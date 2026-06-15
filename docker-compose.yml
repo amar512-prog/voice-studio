@@ -1,0 +1,12 @@
+services:
+  app:
+    build: .
+    image: voice-message-studio
+    container_name: voice-message-studio-app
+    env_file:
+      - .env
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped

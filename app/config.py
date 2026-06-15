@@ -1,0 +1,48 @@
+from functools import lru_cache
+from pathlib import Path
+import os
+
+
+class Settings:
+    def __init__(self) -> None:
+        self.data_dir = Path(os.getenv("DATA_DIR", "data"))
+        self.static_dir = Path(os.getenv("STATIC_DIR", "frontend/dist"))
+        self.elevenlabs_api_key = os.getenv("ELEVENLABS_API_KEY")
+        self.elevenlabs_base_url = os.getenv("ELEVENLABS_BASE_URL", "https://api.elevenlabs.io/v1")
+        self.elevenlabs_model_id = os.getenv("ELEVENLABS_MODEL_ID", "eleven_v3")
+        self.elevenlabs_language_code = os.getenv("ELEVENLABS_LANGUAGE_CODE", "en")
+        self.max_duration_seconds = int(os.getenv("LINKEDIN_MAX_SECONDS", "60"))
+        self.default_target_seconds = int(os.getenv("DEFAULT_TARGET_SECONDS", "55"))
+        self.default_wpm = int(os.getenv("DEFAULT_WPM", "135"))
+        self.auth_mode = os.getenv("AUTH_MODE", "google").lower()
+        if self.auth_mode not in {"development", "google"}:
+            raise RuntimeError("AUTH_MODE must be development or google")
+
+        self.google_client_id = os.getenv("GOOGLE_CLIENT_ID", "")
+        if self.auth_mode == "google" and not self.google_client_id:
+            raise RuntimeError("GOOGLE_CLIENT_ID is required when AUTH_MODE=google")
+
+        self.google_allowed_domains = tuple(
+            domain.strip().lower()
+            for domain in os.getenv("GOOGLE_ALLOWED_DOMAINS", "").split(",")
+            if domain.strip()
+        )
+        self.session_secret = os.getenv("SESSION_SECRET", "")
+        if len(self.session_secret) < 32:
+            raise RuntimeError("SESSION_SECRET must contain at least 32 characters")
+        self.session_secure = os.getenv("SESSION_SECURE", "true").lower() == "true"
+
+        # Username/password login (optional, works alongside Google/development).
+        self.basic_auth_username = os.getenv("AUTH_USERNAME", "")
+        self.basic_auth_password = os.getenv("AUTH_PASSWORD", "")
+        # Static API key for machine/Swagger access via the X-API-Key header.
+        self.api_key = os.getenv("API_KEY", "")
+
+    @property
+    def password_enabled(self) -> bool:
+        return bool(self.basic_auth_username and self.basic_auth_password)
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()
