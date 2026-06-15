@@ -323,7 +323,7 @@ function App() {
     text: "",
     voice_id: "",
     voice_name: "",
-    accent: "neutral",
+    accent: "us",
     speech_context: "outreach_conversational",
     target_seconds: 55,
     wpm: 135,
