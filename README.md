@@ -16,6 +16,8 @@ Open `http://localhost:8000`.
 
 Copy `.env.example` to `.env`, then set `GOOGLE_CLIENT_ID`, `SESSION_SECRET`, and `ELEVENLABS_API_KEY`. The Google client must allow `http://localhost:8000` as an authorized JavaScript origin. Set `SESSION_SECURE=true` behind HTTPS in production.
 
+For a shared server, set `HOST_BIND=127.0.0.1` and an unused `HOST_PORT` such as `8011`, then point the existing HTTPS reverse proxy to that local port. The generated audio and saved voices persist under `./data`.
+
 The UI is split into task pages: `/generate`, `/voices`, `/clone`, `/batch`, and `/saved-files`. The `/files/...` path is reserved for authenticated downloads.
 
 The browser receives only the public Google client ID. Google credentials are verified by FastAPI, and generation, cloning, voice registry, batch, and saved-file routes require the signed session cookie.
