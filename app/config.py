@@ -38,6 +38,11 @@ class Settings:
         # Static API key for machine/Swagger access via the X-API-Key header.
         self.api_key = os.getenv("API_KEY", "")
 
+        # Generation guardrails: bound parallel ffmpeg/TTS work and batch size so a
+        # large upload can't exhaust CPU/memory or run up provider cost.
+        self.max_concurrent_generations = max(1, int(os.getenv("MAX_CONCURRENT_GENERATIONS", "2")))
+        self.max_batch_rows = max(1, int(os.getenv("MAX_BATCH_ROWS", "200")))
+
     @property
     def password_enabled(self) -> bool:
         return bool(self.basic_auth_username and self.basic_auth_password)

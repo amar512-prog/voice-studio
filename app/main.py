@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import asyncio
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 import io
+import logging
+import shutil
 import subprocess
 import zipfile
 from typing import Annotated
@@ -69,6 +73,11 @@ PROVIDER_PAGE_SIZE_MAX = 100
 _shared_page_cache: dict[str, dict] = {}
 _shared_voice_cache: dict[str, dict] = {}
 
+logger = logging.getLogger("voice_message_studio")
+# Bounds concurrent TTS+ffmpeg work so parallel requests/batches can't spawn an
+# unbounded number of ffmpeg processes and exhaust the container.
+_generation_semaphore = asyncio.Semaphore(settings.max_concurrent_generations)
+
 API_DESCRIPTION = """
 **Voice Message Studio** turns text into reviewable LinkedIn-ready voice notes
 using ElevenLabs, with single and batch (Excel) generation, a voice registry,
@@ -100,12 +109,19 @@ OPENAPI_TAGS = [
     {"name": "Files", "description": "Authenticated file downloads from DATA_DIR."},
 ]
 
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    storage.ensure()
+    yield
+
+
 app = FastAPI(
     title="Voice Message Studio",
     version="1.0.0",
     description=API_DESCRIPTION,
     openapi_tags=OPENAPI_TAGS,
     swagger_ui_parameters={"defaultModelsExpandDepth": 0},
+    lifespan=lifespan,
 )
 app.state.settings = settings
 app.add_middleware(
@@ -133,10 +149,6 @@ class PasswordLogin(BaseModel):
 
     model_config = {"json_schema_extra": {"example": {"username": "admin", "password": "your-password"}}}
 
-
-@app.on_event("startup")
-def ensure_storage() -> None:
-    storage.ensure()
 
 
 @app.get(
@@ -1014,7 +1026,21 @@ async def create_batch(
     try:
         requests = workbooks.parse_requests(source_path)
     except WorkbookError as exc:
+        shutil.rmtree(storage.job_folder(job_id), ignore_errors=True)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if not requests:
+        shutil.rmtree(storage.job_folder(job_id), ignore_errors=True)
+        raise HTTPException(status_code=400, detail="The workbook has no data rows.")
+    if len(requests) > settings.max_batch_rows:
+        shutil.rmtree(storage.job_folder(job_id), ignore_errors=True)
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"This batch has {len(requests)} rows, above the limit of "
+                f"{settings.max_batch_rows}. Split it into smaller workbooks."
+            ),
+        )
 
     rows: list[AudioResult] = []
     for index, request in enumerate(requests, start=1):
@@ -1171,85 +1197,91 @@ async def generate_row(job_id: str, index: int, request: TtsRequest) -> AudioRes
     estimated_seconds = duration_service.estimate_seconds(request.text, request.wpm)
     max_seconds = settings.max_duration_seconds
 
-    try:
-        mp3_bytes = await elevenlabs.text_to_speech(
-            voice_id=request.voice_id,
-            text=request.text,
-            speech_context=request.speech_context,
-        )
-        mp3_path = storage.job_row_path(job_id, index, "mp3")
-        mp3_path.parent.mkdir(parents=True, exist_ok=True)
-        mp3_path.write_bytes(mp3_bytes)
-
-        transcript_path = storage.job_row_path(job_id, index, "txt")
-        transcript_path.write_text(request.text, encoding="utf-8")
-
-        actual_seconds = duration_service.measure_seconds(mp3_path)
-        warning = None
-        if actual_seconds > max_seconds:
-            warning = WarningState(
-                level="red",
-                code="hard_limit_exceeded",
-                message=(
-                    f"Generated audio is {actual_seconds:.1f}s, above the "
-                    f"{max_seconds}s LinkedIn voice-note limit."
-                ),
+    # Bound concurrent generation, and run blocking ffmpeg/ffprobe off the event loop.
+    async with _generation_semaphore:
+        try:
+            mp3_bytes = await elevenlabs.text_to_speech(
+                voice_id=request.voice_id,
+                text=request.text,
+                speech_context=request.speech_context,
             )
+            mp3_path = storage.job_row_path(job_id, index, "mp3")
+            mp3_path.parent.mkdir(parents=True, exist_ok=True)
+            mp3_path.write_bytes(mp3_bytes)
 
-        m4a_url = None
-        if request.export_m4a:
-            m4a_path = storage.job_row_path(job_id, index, "m4a")
-            audio_export_service.export_linkedin_m4a(mp3_path, m4a_path)
-            m4a_url = storage.file_url(m4a_path)
+            transcript_path = storage.job_row_path(job_id, index, "txt")
+            transcript_path.write_text(request.text, encoding="utf-8")
 
-        result = AudioResult(
-            job_id=job_id,
-            index=index,
-            status="completed",
-            text=request.text,
-            voice_id=request.voice_id,
-            voice_name=request.voice_name,
-            model_id=settings.elevenlabs_model_id,
-            speech_context=request.speech_context,
-            accent=request.accent,
-            estimated_seconds=estimated_seconds,
-            target_seconds=request.target_seconds,
-            max_seconds=max_seconds,
-            actual_seconds=actual_seconds,
-            warning=warning,
-            mp3_url=storage.file_url(mp3_path),
-            m4a_url=m4a_url,
-            transcript_url=storage.file_url(transcript_path),
-            created_at=created_at,
-        )
-    except (ElevenLabsError, subprocess.CalledProcessError, ValidationError, OSError, ValueError) as exc:
-        warning = None
-        if estimated_seconds > request.target_seconds:
-            warning = WarningState(
-                level="yellow",
-                code="estimated_target_exceeded",
-                message=(
-                    f"Estimated duration is {estimated_seconds:.1f}s, above the "
-                    f"{request.target_seconds}s target. Generation failed before measuring actual audio."
-                ),
+            actual_seconds = await asyncio.to_thread(duration_service.measure_seconds, mp3_path)
+            warning = None
+            if actual_seconds > max_seconds:
+                warning = WarningState(
+                    level="red",
+                    code="hard_limit_exceeded",
+                    message=(
+                        f"Generated audio is {actual_seconds:.1f}s, above the "
+                        f"{max_seconds}s LinkedIn voice-note limit."
+                    ),
+                )
+
+            m4a_url = None
+            if request.export_m4a:
+                m4a_path = storage.job_row_path(job_id, index, "m4a")
+                await asyncio.to_thread(
+                    audio_export_service.export_linkedin_m4a, mp3_path, m4a_path
+                )
+                m4a_url = storage.file_url(m4a_path)
+
+            result = AudioResult(
+                job_id=job_id,
+                index=index,
+                status="completed",
+                text=request.text,
+                voice_id=request.voice_id,
+                voice_name=request.voice_name,
+                model_id=settings.elevenlabs_model_id,
+                speech_context=request.speech_context,
+                accent=request.accent,
+                estimated_seconds=estimated_seconds,
+                target_seconds=request.target_seconds,
+                max_seconds=max_seconds,
+                actual_seconds=actual_seconds,
+                warning=warning,
+                mp3_url=storage.file_url(mp3_path),
+                m4a_url=m4a_url,
+                transcript_url=storage.file_url(transcript_path),
+                created_at=created_at,
             )
-        result = AudioResult(
-            job_id=job_id,
-            index=index,
-            status="failed",
-            text=request.text,
-            voice_id=request.voice_id,
-            voice_name=request.voice_name,
-            model_id=settings.elevenlabs_model_id,
-            speech_context=request.speech_context,
-            accent=request.accent,
-            estimated_seconds=estimated_seconds,
-            target_seconds=request.target_seconds,
-            max_seconds=max_seconds,
-            warning=warning,
-            error=str(exc),
-            created_at=created_at,
-        )
+            return result
+        except (ElevenLabsError, subprocess.CalledProcessError, ValidationError, OSError, ValueError) as exc:
+            logger.warning("Generation failed for job %s row %s: %s", job_id, index, exc)
+            warning = None
+            if estimated_seconds > request.target_seconds:
+                warning = WarningState(
+                    level="yellow",
+                    code="estimated_target_exceeded",
+                    message=(
+                        f"Estimated duration is {estimated_seconds:.1f}s, above the "
+                        f"{request.target_seconds}s target. Generation failed before measuring actual audio."
+                    ),
+                )
+            result = AudioResult(
+                job_id=job_id,
+                index=index,
+                status="failed",
+                text=request.text,
+                voice_id=request.voice_id,
+                voice_name=request.voice_name,
+                model_id=settings.elevenlabs_model_id,
+                speech_context=request.speech_context,
+                accent=request.accent,
+                estimated_seconds=estimated_seconds,
+                target_seconds=request.target_seconds,
+                max_seconds=max_seconds,
+                warning=warning,
+                error=str(exc),
+                created_at=created_at,
+            )
 
     return result
 

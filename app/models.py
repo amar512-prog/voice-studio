@@ -230,16 +230,6 @@ class JobDetail(JobSummary):
     workbook_url: str | None = Field(default=None, description="Results workbook URL for batch jobs.")
 
 
-class FileRecord(BaseModel):
-    id: str = Field(description="Stable file id derived from its path.")
-    name: str = Field(description="File name.")
-    kind: Literal["audio", "transcript", "workbook", "source", "metadata", "other"] = Field(description="File category.")
-    relative_path: str = Field(description="Path relative to DATA_DIR.")
-    url: str = Field(description="Authenticated download URL.")
-    size_bytes: int = Field(description="File size in bytes.")
-    updated_at: datetime = Field(description="Last modified timestamp.")
-
-
 class HealthResponse(BaseModel):
     status: str = Field(description="Service health status.")
     provider_configured: bool = Field(description="Whether ELEVENLABS_API_KEY is configured.")
