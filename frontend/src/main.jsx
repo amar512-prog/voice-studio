@@ -798,10 +798,23 @@ function App() {
       if (!batchFile) throw new Error("Choose an .xlsx workbook first.");
       const form = new FormData();
       form.append("file", batchFile, batchFile.name);
-      const payload = await apiJson("/api/tts/batch", { method: "POST", body: form });
-      setBatchResult(payload);
+      // Async submit: returns 202 + a running job; then poll until terminal.
+      const job = await apiJson("/api/tts/batch", { method: "POST", body: form });
+      setBatchResult(job);
+      setStatus(`Batch submitted (${job.total_rows} rows). Generating...`);
+
+      const TERMINAL = new Set(["completed", "partial", "failed", "interrupted"]);
+      let detail = job;
+      while (!TERMINAL.has(detail.status)) {
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+        detail = await apiJson(`/api/jobs/${encodeURIComponent(job.job_id)}`);
+        setBatchResult(detail);
+      }
       await refreshJobs();
-      setStatus(`Batch finished: ${payload.completed_rows}/${payload.total_rows} completed.`);
+      setStatus(
+        `Batch ${detail.status}: ${detail.completed_rows}/${detail.total_rows} completed` +
+          (detail.failed_rows ? `, ${detail.failed_rows} failed.` : ".")
+      );
     } catch (err) {
       setError(err.message);
     } finally {
@@ -1715,27 +1728,24 @@ function JobListView({ jobs, openJob, refreshHistory, busy }) {
         </div>
       ) : (
         <div className="job-list">
-          {jobs.map((job) => {
-            const ok = job.failed_rows === 0;
-            return (
-              <button
-                key={job.job_id}
-                type="button"
-                className="job-row"
-                onClick={() => openJob(job.job_id)}
-              >
-                <div className="job-row-main">
-                  <strong>{job.job_id}</strong>
-                  <span>
-                    {job.kind === "batch" ? "Batch" : "Single"} · {formatDate(job.created_at)}
-                  </span>
-                </div>
-                <span className={ok ? "job-badge ok" : "job-badge warn"}>
-                  {job.completed_rows}/{job.total_rows} success
+          {jobs.map((job) => (
+            <button
+              key={job.job_id}
+              type="button"
+              className="job-row"
+              onClick={() => openJob(job.job_id)}
+            >
+              <div className="job-row-main">
+                <strong>{job.job_id}</strong>
+                <span>
+                  {job.kind === "batch" ? "Batch" : "Single"} · {formatDate(job.created_at)} ·{" "}
+                  {job.completed_rows}/{job.total_rows} ok
+                  {job.failed_rows ? `, ${job.failed_rows} failed` : ""}
                 </span>
-              </button>
-            );
-          })}
+              </div>
+              <span className={`job-badge ${jobBadgeClass(job.status)}`}>{job.status || "completed"}</span>
+            </button>
+          ))}
         </div>
       )}
     </section>
@@ -1756,13 +1766,18 @@ function JobDetailView({ jobId, jobDetail, closeJob, busy }) {
             <h2>{jobId}</h2>
             {ready && (
               <p>
+                <span className={`job-badge ${jobBadgeClass(jobDetail.status)}`}>
+                  {jobDetail.status}
+                </span>{" "}
                 {jobDetail.kind === "batch" ? "Batch" : "Single"} · {formatDate(jobDetail.created_at)} ·{" "}
-                {jobDetail.completed_rows}/{jobDetail.total_rows} success
+                {jobDetail.completed_rows}/{jobDetail.total_rows} ok
+                {jobDetail.failed_rows ? `, ${jobDetail.failed_rows} failed` : ""}
+                {jobDetail.error ? ` — ${jobDetail.error}` : ""}
               </p>
             )}
           </div>
         </div>
-        {ready && (
+        {ready && jobDetail.status !== "running" && (
           <a
             className="primary-button"
             href={`/api/jobs/${encodeURIComponent(jobId)}/download`}
@@ -2049,20 +2064,55 @@ function BatchPanel({ batchFile, setBatchFile, uploadBatch, busy, batchResult })
       </button>
       {batchResult && (
         <div className="batch-summary">
-          <strong>
-            {batchResult.completed_rows}/{batchResult.total_rows} completed
-          </strong>
-          <span>{batchResult.failed_rows} failed</span>
-          {batchResult.workbook_url && (
-            <a href={batchResult.workbook_url} download>
-              <Download size={16} />
-              Results workbook
-            </a>
+          <div className="batch-summary-head">
+            <span className={`job-badge ${jobBadgeClass(batchResult.status)}`}>
+              {batchResult.status || "running"}
+            </span>
+            <strong>
+              {(batchResult.completed_rows || 0) + (batchResult.failed_rows || 0)}/
+              {batchResult.total_rows} rows
+            </strong>
+            {batchResult.failed_rows ? <span>{batchResult.failed_rows} failed</span> : null}
+          </div>
+          {batchResult.total_rows > 0 && (
+            <div className="batch-progress">
+              <div
+                className="batch-progress-fill"
+                style={{
+                  width: `${Math.round(
+                    (((batchResult.completed_rows || 0) + (batchResult.failed_rows || 0)) /
+                      batchResult.total_rows) *
+                      100
+                  )}%`
+                }}
+              />
+            </div>
           )}
+          {batchResult.error && <small className="batch-error">{batchResult.error}</small>}
+          <div className="batch-summary-actions">
+            {batchResult.workbook_url && (
+              <a href={batchResult.workbook_url} download>
+                <Download size={16} />
+                Results workbook
+              </a>
+            )}
+            {batchResult.job_id && batchResult.status && batchResult.status !== "running" && (
+              <a href={`/api/jobs/${encodeURIComponent(batchResult.job_id)}/download`} download>
+                <Download size={16} />
+                Download ZIP
+              </a>
+            )}
+          </div>
         </div>
       )}
     </form>
   );
+}
+
+function jobBadgeClass(status) {
+  if (status === "completed") return "ok";
+  if (status === "running") return "info";
+  return "warn";
 }
 
 createRoot(document.getElementById("root")).render(<App />);

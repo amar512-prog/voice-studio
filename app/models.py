@@ -216,18 +216,30 @@ class BatchResult(BaseModel):
     workbook_url: str | None = Field(default=None, description="Authenticated download URL for the results workbook.")
 
 
+JobStatus = Literal["running", "completed", "partial", "failed", "interrupted"]
+
+
 class JobSummary(BaseModel):
     job_id: str = Field(description="Persistent job id.")
     kind: Literal["single", "batch"] = Field(description="Whether this job came from single or batch generation.")
+    status: JobStatus = Field(
+        default="completed",
+        description=(
+            "Job lifecycle state. running=in progress; completed=all rows ok; "
+            "partial=some rows failed; failed=all rows failed or a job-level error; "
+            "interrupted=the server restarted mid-run."
+        ),
+    )
     created_at: datetime = Field(description="Job creation timestamp.")
     total_rows: int = Field(description="Total rows in the job.")
-    completed_rows: int = Field(description="Rows completed successfully.")
-    failed_rows: int = Field(description="Rows that failed.")
+    completed_rows: int = Field(description="Rows completed successfully so far.")
+    failed_rows: int = Field(description="Rows that failed so far.")
 
 
 class JobDetail(JobSummary):
-    rows: list[AudioResult] = Field(description="Per-row generation results.")
-    workbook_url: str | None = Field(default=None, description="Results workbook URL for batch jobs.")
+    rows: list[AudioResult] = Field(description="Per-row results available so far (grows while running).")
+    workbook_url: str | None = Field(default=None, description="Results workbook URL, set once the batch finishes.")
+    error: str | None = Field(default=None, description="Job-level error when status is failed or interrupted.")
 
 
 class HealthResponse(BaseModel):

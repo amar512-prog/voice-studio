@@ -20,11 +20,11 @@ from app.auth import current_user, validate_basic_credentials, verify_google_cre
 from app.config import get_settings
 from app.models import (
     AudioResult,
-    BatchResult,
     CacheClearResponse,
     ConfigResponse,
     HealthResponse,
     JobDetail,
+    JobStatus,
     JobSummary,
     LogoutResponse,
     ProviderVoiceByIdRequest,
@@ -77,6 +77,8 @@ logger = logging.getLogger("voice_message_studio")
 # Bounds concurrent TTS+ffmpeg work so parallel requests/batches can't spawn an
 # unbounded number of ffmpeg processes and exhaust the container.
 _generation_semaphore = asyncio.Semaphore(settings.max_concurrent_generations)
+# Strong refs to in-flight background batch tasks so they are not garbage-collected.
+_background_tasks: set[asyncio.Task] = set()
 
 API_DESCRIPTION = """
 **Voice Message Studio** turns text into reviewable LinkedIn-ready voice notes
@@ -109,9 +111,30 @@ OPENAPI_TAGS = [
     {"name": "Files", "description": "Authenticated file downloads from DATA_DIR."},
 ]
 
+def _reconcile_interrupted_jobs() -> None:
+    """Mark jobs left 'running' by a previous process as interrupted.
+
+    Safe because this single-worker process starts with zero in-flight tasks, so
+    any persisted 'running' job cannot still be alive. NOTE: this assumption breaks
+    with multiple workers/processes — switch to heartbeat-based reaping if you scale.
+    """
+    for job_id in storage.list_job_ids():
+        manifest = storage.read_job_manifest(job_id)
+        if not manifest or manifest.get("status") != "running":
+            continue
+        manifest["status"] = "interrupted"
+        manifest["error"] = "Generation was interrupted because the server restarted. Re-run this batch."
+        completed = manifest.get("completed_rows", 0)
+        total = manifest.get("total_rows", 0)
+        manifest["failed_rows"] = max(manifest.get("failed_rows", 0), total - completed)
+        storage.save_job_manifest(job_id, manifest)
+        logger.warning("Marked interrupted job %s on startup", job_id)
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     storage.ensure()
+    _reconcile_interrupted_jobs()
     yield
 
 
@@ -947,6 +970,17 @@ async def clone_voice(
     return voice_registry.upsert_record(record)
 
 
+def _job_status(rows: list[AudioResult], total: int) -> str:
+    """Terminal status for a finished job from its rows."""
+    completed = sum(1 for row in rows if row.status == "completed")
+    failed = sum(1 for row in rows if row.status == "failed")
+    if completed == total:
+        return "completed"
+    if completed == 0 and failed == total:
+        return "failed"
+    return "partial"
+
+
 def _save_job_manifest(
     job_id: str,
     kind: str,
@@ -958,6 +992,7 @@ def _save_job_manifest(
     detail = JobDetail(
         job_id=job_id,
         kind=kind,
+        status=_job_status(rows, len(rows)),
         created_at=created_at,
         total_rows=len(rows),
         completed_rows=completed,
@@ -991,12 +1026,74 @@ async def create_tts(request: TtsRequest, _user: dict = Depends(current_user)) -
     return row
 
 
+def _write_job_progress(
+    job_id: str,
+    created_at: datetime,
+    *,
+    status: JobStatus,
+    total_rows: int,
+    rows: list[AudioResult],
+    workbook_url: str | None = None,
+    error: str | None = None,
+) -> None:
+    detail = JobDetail(
+        job_id=job_id,
+        kind="batch",
+        status=status,
+        created_at=created_at,
+        total_rows=total_rows,
+        completed_rows=sum(1 for row in rows if row.status == "completed"),
+        failed_rows=sum(1 for row in rows if row.status == "failed"),
+        rows=rows,
+        workbook_url=workbook_url,
+        error=error,
+    )
+    storage.save_job_manifest(job_id, detail.model_dump(mode="json"))
+
+
+async def run_batch_job(job_id: str, created_at: datetime, requests: list[TtsRequest]) -> None:
+    """Background runner: generate rows concurrently and keep the manifest updated."""
+    total = len(requests)
+    results: dict[int, AudioResult] = {}
+
+    def ordered_rows() -> list[AudioResult]:
+        return [results[index] for index in sorted(results)]
+
+    async def run_one(index: int, request: TtsRequest) -> None:
+        result = await generate_row(job_id, index, request)
+        # No await between mutation and the write, so it is atomic on the event loop.
+        results[index] = result
+        _write_job_progress(job_id, created_at, status="running", total_rows=total, rows=ordered_rows())
+
+    try:
+        await asyncio.gather(*(run_one(i, r) for i, r in enumerate(requests, start=1)))
+        rows = ordered_rows()
+        workbook_path = storage.job_folder(job_id) / "tts_results.xlsx"
+        await asyncio.to_thread(
+            workbooks.write_results, workbook_path, [row.model_dump(mode="json") for row in rows]
+        )
+        _write_job_progress(
+            job_id,
+            created_at,
+            status=_job_status(rows, total),
+            total_rows=total,
+            rows=rows,
+            workbook_url=storage.file_url(workbook_path),
+        )
+    except Exception as exc:  # finalize as failed rather than leaving the job 'running'
+        logger.exception("Batch job %s failed", job_id)
+        _write_job_progress(
+            job_id, created_at, status="failed", total_rows=total, rows=ordered_rows(), error=str(exc)
+        )
+
+
 @app.post(
     "/api/tts/batch",
-    response_model=BatchResult,
+    status_code=202,
+    response_model=JobSummary,
     tags=["Generate"],
-    summary="Generate from an .xlsx batch",
-    response_description="Batch generation summary and per-row results.",
+    summary="Submit an .xlsx batch (async)",
+    response_description="Accepted job. Poll GET /api/jobs/{job_id} for status, progress, and results.",
 )
 async def create_batch(
     file: UploadFile = File(
@@ -1007,12 +1104,16 @@ async def create_batch(
         ),
     ),
     _user: dict = Depends(current_user),
-) -> BatchResult:
+) -> JobSummary:
     """
-    Generate audio for every non-empty row in an uploaded Excel workbook.
+    Accept an Excel workbook and generate audio for every non-empty row in the
+    background, returning immediately with a job you can poll.
 
-    CSV is intentionally rejected because message text may contain commas. The
-    response includes a generated results workbook and row-level result objects.
+    The workbook is parsed and validated synchronously (bad file or over-limit row
+    counts fail here with 400). Generation then runs asynchronously: poll
+    `GET /api/jobs/{job_id}` until `status` is `completed`, `partial`, `failed`, or
+    `interrupted`, then download via `GET /api/jobs/{job_id}/download`. CSV is
+    rejected because message text may contain commas.
     """
     if not (file.filename or "").lower().endswith(".xlsx"):
         raise HTTPException(status_code=400, detail="Upload an .xlsx workbook, not CSV.")
@@ -1042,23 +1143,21 @@ async def create_batch(
             ),
         )
 
-    rows: list[AudioResult] = []
-    for index, request in enumerate(requests, start=1):
-        rows.append(await generate_row(job_id, index, request))
+    total = len(requests)
+    _write_job_progress(job_id, created_at, status="running", total_rows=total, rows=[])
 
-    workbook_path = storage.job_folder(job_id) / "tts_results.xlsx"
-    workbooks.write_results(workbook_path, [row.model_dump(mode="json") for row in rows])
+    task = asyncio.create_task(run_batch_job(job_id, created_at, requests))
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
 
-    detail = _save_job_manifest(
-        job_id, "batch", created_at, rows, workbook_url=storage.file_url(workbook_path)
-    )
-    return BatchResult(
-        batch_id=job_id,
-        total_rows=detail.total_rows,
-        completed_rows=detail.completed_rows,
-        failed_rows=detail.failed_rows,
-        results=rows,
-        workbook_url=detail.workbook_url,
+    return JobSummary(
+        job_id=job_id,
+        kind="batch",
+        status="running",
+        created_at=created_at,
+        total_rows=total,
+        completed_rows=0,
+        failed_rows=0,
     )
 
 
@@ -1107,6 +1206,8 @@ def download_job(
     if not manifest:
         raise HTTPException(status_code=404, detail="Job not found.")
     detail = JobDetail.model_validate(manifest)
+    if detail.status == "running":
+        raise HTTPException(status_code=409, detail="Job is still running. Poll until it finishes.")
 
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:

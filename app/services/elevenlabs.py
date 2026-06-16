@@ -40,26 +40,43 @@ class ElevenLabsClient:
         }
         params = {"output_format": "mp3_44100_128"}
 
-        # Retry transient transport errors (connection blips, timeouts); a 4xx/5xx
-        # status is a real API error and is surfaced without retrying.
-        last_error: httpx.HTTPError | None = None
-        for attempt in range(3):
+        # Retry transient failures: transport errors (connection blips/timeouts),
+        # 429 (ElevenLabs concurrency/rate limit), and 5xx (system busy). Other 4xx
+        # (bad voice, plan limit, quota) are real errors and are surfaced at once.
+        max_attempts = 4
+        for attempt in range(max_attempts):
+            last_attempt = attempt == max_attempts - 1
             try:
                 async with httpx.AsyncClient(timeout=120) as client:
                     response = await client.post(url, headers=headers, params=params, json=payload)
             except httpx.HTTPError as exc:
-                last_error = exc
-                if attempt < 2:
-                    await asyncio.sleep(1.5 * (attempt + 1))
-                    continue
-                raise ElevenLabsError(
-                    f"Could not reach ElevenLabs after 3 attempts: {last_error!s} "
-                    f"({type(last_error).__name__})."
-                ) from last_error
+                if last_attempt:
+                    raise ElevenLabsError(
+                        f"Could not reach ElevenLabs after {max_attempts} attempts: "
+                        f"{exc!s} ({type(exc).__name__})."
+                    ) from exc
+                await asyncio.sleep(self._backoff_seconds(None, attempt))
+                continue
+
+            if response.status_code in self.RETRYABLE_STATUS and not last_attempt:
+                await asyncio.sleep(self._backoff_seconds(response, attempt))
+                continue
             if response.status_code >= 400:
                 raise ElevenLabsError(self._provider_error(response))
             return response.content
         raise ElevenLabsError("Could not reach ElevenLabs.")
+
+    RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+
+    def _backoff_seconds(self, response: httpx.Response | None, attempt: int) -> float:
+        if response is not None:
+            retry_after = response.headers.get("retry-after")
+            if retry_after:
+                try:
+                    return min(float(retry_after), 30.0)
+                except ValueError:
+                    pass
+        return min(1.5 * (2**attempt), 30.0)
 
     def _prepare_text(self, text: str, speech_context: SpeechContext) -> str:
         clean_text = text.strip()

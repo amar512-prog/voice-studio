@@ -1429,6 +1429,46 @@ audio {
   color: #b3261e;
 }
 
+.job-badge.info {
+  background: #e8f0fe;
+  color: #1a56c4;
+}
+
+.batch-summary-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.batch-progress {
+  height: 8px;
+  border-radius: 999px;
+  background: var(--border);
+  overflow: hidden;
+  margin-top: 10px;
+}
+
+.batch-progress-fill {
+  height: 100%;
+  background: #2f8f7f;
+  border-radius: 999px;
+  transition: width 0.4s ease;
+}
+
+.batch-error {
+  display: block;
+  margin-top: 8px;
+  color: var(--red);
+}
+
+.batch-summary-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin-top: 10px;
+}
+
 .job-detail-head {
   display: flex;
   align-items: center;

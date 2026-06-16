@@ -40,6 +40,8 @@ class Settings:
 
         # Generation guardrails: bound parallel ffmpeg/TTS work and batch size so a
         # large upload can't exhaust CPU/memory or run up provider cost.
+        # Keep MAX_CONCURRENT_GENERATIONS <= your ElevenLabs plan's concurrency limit
+        # (Free 2, Starter 3, Creator 5, Pro 10, Scale/Business 15) to avoid 429s.
         self.max_concurrent_generations = max(1, int(os.getenv("MAX_CONCURRENT_GENERATIONS", "2")))
         self.max_batch_rows = max(1, int(os.getenv("MAX_BATCH_ROWS", "200")))
 
