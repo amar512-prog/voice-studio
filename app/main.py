@@ -47,12 +47,35 @@ from app.services.voice_registry import VoiceRegistry
 from app.services.workbook import WorkbookError, WorkbookService
 
 settings = get_settings()
-storage = StorageService(settings)
-storage.ensure()
-voice_registry = VoiceRegistry(storage)
+
+# Providers are fully separated on disk under data/{provider}/. Phase 1 wires only
+# ElevenLabs; adding a provider later means registering its client/storage here.
+PROVIDERS = ("elevenlabs",)
+_storages = {provider: StorageService(settings, provider) for provider in PROVIDERS}
+for _provider_storage in _storages.values():
+    _provider_storage.ensure()
+_registries = {provider: VoiceRegistry(_storages[provider]) for provider in PROVIDERS}
+_clients = {provider: ElevenLabsClient(settings) for provider in PROVIDERS}
+
+
+def storage_for(provider: str) -> StorageService:
+    return _storages[provider]
+
+
+def registry_for(provider: str) -> VoiceRegistry:
+    return _registries[provider]
+
+
+def client_for(provider: str) -> ElevenLabsClient:
+    return _clients[provider]
+
+
+# Active-provider singletons used by the (still single-provider) routes today.
+storage = _storages["elevenlabs"]
+voice_registry = _registries["elevenlabs"]
+elevenlabs = _clients["elevenlabs"]
 duration_service = DurationService()
 audio_export_service = AudioExportService()
-elevenlabs = ElevenLabsClient(settings)
 workbooks = WorkbookService()
 PROVIDER_LIBRARY_ACCENTS = {"us", "in"}
 ACCENT_LABELS = {"us": "American", "in": "Indian", "neutral": "Neutral"}

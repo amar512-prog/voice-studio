@@ -26,9 +26,12 @@ def safe_filename(name: str) -> str:
 
 
 class StorageService:
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, provider: str = "elevenlabs") -> None:
         self.settings = settings
-        self.root = settings.data_dir
+        self.provider = provider
+        # Each provider gets its own subtree: data/{provider}/... so a provider's
+        # voices, jobs, and source audio are fully separated on disk.
+        self.root = settings.data_dir / provider
         self.voices_dir = self.root / "voices"
         self.audio_dir = self.root / "generated_audio"
         self.batch_dir = self.root / "batches"
