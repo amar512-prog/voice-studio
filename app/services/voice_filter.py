@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Any
 
 
-ALLOWED_ACCENTS = {"us", "in", "neutral"}
+ALLOWED_ACCENTS = {"us", "in", "neutral", "auto"}
 @dataclass(frozen=True)
 class ProviderVoiceProfile:
     accent: str

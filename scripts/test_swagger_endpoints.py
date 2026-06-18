@@ -143,7 +143,11 @@ class FakeDurationService:
 
 
 class FakeAudioExportService:
+    def __init__(self) -> None:
+        self.wav_calls: list[tuple[Path, Path]] = []
+
     def export_wav(self, input_audio: Path, output_wav: Path) -> None:
+        self.wav_calls.append((input_audio, output_wav))
         output_wav.write_bytes(input_audio.read_bytes())
 
     def export_mp3(self, input_wav: Path, output_mp3: Path) -> None:
@@ -206,7 +210,8 @@ def main() -> int:
         app_module.elevenlabs = FakeElevenLabs()
         app_module._clients["omnivoice"] = FakeOmniVoice()
         app_module.duration_service = FakeDurationService()
-        app_module.audio_export_service = FakeAudioExportService()
+        fake_audio_export = FakeAudioExportService()
+        app_module.audio_export_service = fake_audio_export
 
         tested: set[tuple[str, str]] = set()
 
@@ -619,6 +624,30 @@ def main() -> int:
             ).json()
             assert cloned_omnivoice["provider_metadata"]["reference_text"] == "This is the reference transcript."
             assert cloned_omnivoice["accent"] == "auto"
+            clone_input, clone_output = fake_audio_export.wav_calls[-1]
+            assert clone_input.name.endswith(".wav")
+            assert clone_output != clone_input
+            assert clone_output.name.endswith("-normalized.wav")
+            assert cloned_omnivoice["source_audio_path"].endswith("-normalized.wav")
+            omnivoice_voices_after_clone = call(
+                "GET",
+                "/api/{provider}/voices",
+                "/api/omnivoice/voices",
+                headers=api_headers,
+            ).json()
+            assert any(voice["id"] == cloned_omnivoice["id"] for voice in omnivoice_voices_after_clone)
+            clone_tts = call(
+                "POST",
+                "/api/{provider}/tts",
+                "/api/omnivoice/tts",
+                headers=api_headers,
+                json={
+                    "text": "Generate with the uploaded clone.",
+                    "voice_id": cloned_omnivoice["voice_id"],
+                    "speech_context": "english_american",
+                },
+            ).json()
+            assert clone_tts["voice_id"] == cloned_omnivoice["voice_id"]
 
             invalid_accent = call(
                 "POST",

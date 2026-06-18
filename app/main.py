@@ -225,6 +225,22 @@ def validate_provider(provider: str) -> str:
     return provider
 
 
+def audio_export_error_detail(exc: Exception) -> str:
+    base = "Could not read the uploaded sample. Use a clear mp3, wav, m4a, or webm recording."
+    if isinstance(exc, subprocess.CalledProcessError):
+        output = "\n".join(part for part in [exc.stderr, exc.stdout] if part)
+        lines = [line.strip() for line in output.splitlines() if line.strip()]
+        if lines:
+            reason = " ".join(lines[-6:])
+            if len(reason) > 700:
+                reason = reason[-700:]
+            return f"{base} Audio conversion failed: {reason}"
+        return f"{base} Audio conversion failed with exit code {exc.returncode}."
+    if isinstance(exc, OSError) and str(exc):
+        return f"{base} Audio conversion failed: {exc}"
+    return base
+
+
 def provider_configured(provider: str) -> bool:
     provider = validate_provider(provider)
     if provider == "elevenlabs":
@@ -1468,12 +1484,14 @@ async def clone_voice(
         # which can't decode browser recordings (webm/opus). Normalize to WAV and
         # use that as the reference sample; keep the original upload for audit.
         wav_path = source_path.with_suffix(".wav")
+        if wav_path == source_path:
+            wav_path = source_path.with_name(f"{source_path.stem}-normalized.wav")
         try:
             await asyncio.to_thread(audio_export_service.export_wav, source_path, wav_path)
         except (subprocess.CalledProcessError, OSError) as exc:
             raise HTTPException(
                 status_code=400,
-                detail="Could not read the uploaded sample. Use a clear mp3, wav, m4a, or webm recording.",
+                detail=audio_export_error_detail(exc),
             ) from exc
         timestamp = now_utc()
         voice_id = new_id("ov_clone")
