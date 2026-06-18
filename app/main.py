@@ -1321,6 +1321,17 @@ async def clone_voice(
     source_path.write_bytes(await sample.read())
 
     if provider == "omnivoice":
+        # The OmniVoice space reads the sample as reference audio (soundfile),
+        # which can't decode browser recordings (webm/opus). Normalize to WAV and
+        # use that as the reference sample; keep the original upload for audit.
+        wav_path = source_path.with_suffix(".wav")
+        try:
+            await asyncio.to_thread(audio_export_service.export_wav, source_path, wav_path)
+        except (subprocess.CalledProcessError, OSError) as exc:
+            raise HTTPException(
+                status_code=400,
+                detail="Could not read the uploaded sample. Use a clear mp3, wav, m4a, or webm recording.",
+            ) from exc
         timestamp = now_utc()
         voice_id = new_id("ov_clone")
         omnivoice_metadata = {
@@ -1342,7 +1353,7 @@ async def clone_voice(
             source_type="cloned",
             accent=accent,
             consent_status="confirmed",
-            source_audio_path=provider_storage.relative_to_data(source_path),
+            source_audio_path=provider_storage.relative_to_data(wav_path),
             provider_metadata=omnivoice_metadata,
             created_at=timestamp,
             updated_at=timestamp,

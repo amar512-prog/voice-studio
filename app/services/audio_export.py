@@ -3,6 +3,29 @@ import subprocess
 
 
 class AudioExportService:
+    def export_wav(self, input_audio: Path, output_wav: Path) -> None:
+        """Normalize any input (webm/opus/m4a/mp3/...) to mono 24kHz PCM WAV.
+
+        OmniVoice loads reference audio with soundfile/torchaudio, which cannot
+        read browser recordings (webm/opus); this gives it a readable sample.
+        """
+        output_wav.parent.mkdir(parents=True, exist_ok=True)
+        command = [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(input_audio),
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            "24000",
+            "-c:a",
+            "pcm_s16le",
+            str(output_wav),
+        ]
+        subprocess.run(command, check=True, capture_output=True, text=True)
+
     def export_mp3(self, input_audio: Path, output_mp3: Path) -> None:
         output_mp3.parent.mkdir(parents=True, exist_ok=True)
         command = [
