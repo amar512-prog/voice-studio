@@ -4,10 +4,13 @@ import {
   AlertCircle,
   ArrowDownWideNarrow,
   CheckCircle2,
+  ChevronDown,
+  ChevronRight,
   Copy,
   Download,
   FileSpreadsheet,
   LogOut,
+  ListChecks,
   Mic,
   Pause,
   Play,
@@ -57,16 +60,8 @@ const PROVIDER_SORTS = [
   { id: "most_users", label: "Most users" },
   { id: "characters", label: "Characters" }
 ];
+const DEFAULT_PROVIDER = "omnivoice";
 const PROVIDERS = [
-  {
-    id: "elevenlabs",
-    label: "ElevenLabs",
-    shortLabel: "EL",
-    modelLabel: "Eleven v3 Natural",
-    subtitle: "Library voices, shared voices, and hosted cloning.",
-    supportsVoiceLibrary: true,
-    supportsRawVoiceId: true
-  },
   {
     id: "omnivoice",
     label: "OmniVoice",
@@ -75,9 +70,19 @@ const PROVIDERS = [
     subtitle: "Local presets and sample-based clones through the Hugging Face Space.",
     supportsVoiceLibrary: false,
     supportsRawVoiceId: false
+  },
+  {
+    id: "elevenlabs",
+    label: "ElevenLabs",
+    shortLabel: "EL",
+    modelLabel: "Eleven v3 Natural",
+    subtitle: "Library voices, shared voices, and hosted cloning.",
+    supportsVoiceLibrary: true,
+    supportsRawVoiceId: true
   }
 ];
 const PROVIDER_BY_ID = new Map(PROVIDERS.map((provider) => [provider.id, provider]));
+const OMNIVOICE_BUILTIN_CONTEXT_IDS = new Set(["english_american", "english_indian"]);
 
 const PROVIDER_PAGE_COPY = {
   elevenlabs: {
@@ -89,6 +94,7 @@ const PROVIDER_PAGE_COPY = {
   },
   omnivoice: {
     generate: "Generate from synced presets or local clones. OmniVoice presets use strict supported voice attributes.",
+    rules: "Check message text for OmniVoice pronunciation problems before single or batch generation.",
     voices: "Sync curated presets, manage local clones, and keep saved voices ready for generation.",
     clone: "Store a consented sample locally for OmniVoice cloning and future reuse.",
     batch: "Process workbook rows with saved OmniVoice preset or clone ids and export the results.",
@@ -104,6 +110,15 @@ const PAGES = [
     title: "Generate audio",
     description: "Create one reviewable voice-note file.",
     icon: Wand2
+  },
+  {
+    id: "rules",
+    path: "/rules",
+    label: "Rules",
+    title: "Text readiness rules",
+    description: "Check text before OmniVoice generation.",
+    icon: ListChecks,
+    providers: ["omnivoice"]
   },
   {
     id: "voices",
@@ -142,12 +157,16 @@ const PAGES = [
 const PAGE_BY_ID = new Map(PAGES.map((page) => [page.id, page]));
 const PAGE_BY_PATH = new Map(PAGES.map((page) => [page.path, page.id]));
 
+function pageAvailableForProvider(page, provider) {
+  return !page?.providers || page.providers.includes(provider);
+}
+
 function pageDescriptionFor(provider, pageId, fallback) {
   return PROVIDER_PAGE_COPY[provider]?.[pageId] || fallback;
 }
 
 function routeStateFromPath(pathname) {
-  const storedProvider = window.localStorage.getItem("voice-message-provider") || "elevenlabs";
+  const storedProvider = window.localStorage.getItem("voice-message-provider") || DEFAULT_PROVIDER;
   const normalized = pathname === "/" ? "" : pathname.replace(/\/$/, "");
   const parts = normalized.split("/").filter(Boolean);
   const provider = PROVIDER_BY_ID.has(parts[0]) ? parts[0] : storedProvider;
@@ -162,9 +181,10 @@ function routeStateFromPath(pathname) {
     };
   }
 
+  const page = PAGE_BY_ID.get(PAGE_BY_PATH.get(routePath) || "generate");
   return {
     provider,
-    page: PAGE_BY_PATH.get(routePath) || "generate",
+    page: pageAvailableForProvider(page, provider) ? page.id : "generate",
     jobId: null
   };
 }
@@ -399,7 +419,7 @@ function App() {
     voice_id: "",
     voice_name: "",
     accent: "us",
-    speech_context: "outreach_conversational",
+    speech_context: initialRoute.provider === "omnivoice" ? "english_american" : "outreach_conversational",
     target_seconds: 55,
     wpm: 135,
     export_m4a: true
@@ -510,6 +530,13 @@ function App() {
     setResult(null);
     setBatchResult(null);
     setJobDetail(null);
+    setTtsForm((current) => ({
+      ...current,
+      voice_id: "",
+      voice_name: "",
+      accent: "us",
+      speech_context: activeProvider === "omnivoice" ? "english_american" : "outreach_conversational"
+    }));
   }, [activeProvider]);
 
   async function refreshBootData(provider) {
@@ -911,6 +938,7 @@ function App() {
         name: "",
         accent: "neutral",
         description: "",
+        reference_text: "",
         consent_confirmed: false,
         sample: null
       });
@@ -972,7 +1000,8 @@ function App() {
       ...current,
       voice_id: value,
       voice_name: voice?.display_name || current.voice_name,
-      accent: voice?.accent || current.accent
+      accent: voice?.accent || current.accent,
+      speech_context: voice?.provider_metadata?.context_id || current.speech_context
     }));
   }
 
@@ -1007,7 +1036,7 @@ function App() {
   if (!user) return <LoginScreen config={config} onLogin={setUser} />;
 
   const currentPage = PAGE_BY_ID.get(activePage) || PAGE_BY_ID.get("generate");
-  const activeProviderMeta = PROVIDER_BY_ID.get(activeProvider) || PROVIDER_BY_ID.get("elevenlabs");
+  const activeProviderMeta = PROVIDER_BY_ID.get(activeProvider) || PROVIDER_BY_ID.get(DEFAULT_PROVIDER);
 
   return (
     <div className="app-shell">
@@ -1027,7 +1056,7 @@ function App() {
           onSelect={switchProvider}
         />
 
-        <PageNav activePage={activePage} onNavigate={navigate} />
+        <PageNav activeProvider={activeProvider} activePage={activePage} onNavigate={navigate} />
 
         <section className="rail-card">
           <div className="health-row">
@@ -1103,6 +1132,17 @@ function App() {
           />
         )}
 
+        {activePage === "rules" && activeProvider === "omnivoice" && (
+          <RulesPage
+            text={ttsForm.text}
+            onApply={(text) => {
+              setTtsForm((current) => ({ ...current, text }));
+              setStatus("Suggested text applied to Generate.");
+              navigate("generate");
+            }}
+          />
+        )}
+
         {activePage === "voices" && (
           <VoicesPage
             activeProvider={activeProvider}
@@ -1170,10 +1210,10 @@ function App() {
   );
 }
 
-function PageNav({ activePage, onNavigate }) {
+function PageNav({ activeProvider, activePage, onNavigate }) {
   return (
     <nav className="page-nav" aria-label="Main sections">
-      {PAGES.map((page) => {
+      {PAGES.filter((page) => pageAvailableForProvider(page, activeProvider)).map((page) => {
         const Icon = page.icon;
         return (
           <button
@@ -1246,10 +1286,10 @@ function GeneratePage({
       setTtsForm((current) => ({ ...current, speech_context: contextOptions[0].id }));
     }
   }, [activeProvider, omnivoiceContexts.length, config.contexts]);
-  const voiceSelectLabel = isElevenLabs ? "Voice" : "Voice sample";
+  const voiceSelectLabel = isElevenLabs ? "Voice" : "Preset or voice sample";
   const providerNote = isElevenLabs
     ? "Saved library or shared voices appear here. You can still paste a direct ElevenLabs voice id when needed."
-    : "Pick a voice sample and a speech context. Edit the context's voice design (instruct + settings) below.";
+    : "Pick an American/Indian design preset or a saved clone. Design presets use context instructions; clones use their sample plus context generation settings.";
 
   return (
     <section className="work-grid">
@@ -1266,7 +1306,7 @@ function GeneratePage({
         </div>
 
         <div className="provider-note">
-          <strong>{isElevenLabs ? "Hosted library + hosted cloning" : "Voice sample + speech context"}</strong>
+          <strong>{isElevenLabs ? "Hosted library + hosted cloning" : "Design preset or voice sample"}</strong>
           <p>{providerNote}</p>
         </div>
 
@@ -1287,7 +1327,7 @@ function GeneratePage({
               value={selectedVoiceVisible ? ttsForm.voice_id : ""}
               onChange={(event) => selectVoice(event.target.value)}
             >
-              <option value="">Choose {accentLabel} voice</option>
+              <option value="">Choose {accentLabel} {isElevenLabs ? "voice" : "preset or sample"}</option>
               {filteredVoices.length === 0 && (
                 <option value="" disabled>
                   No {accentLabel} voices saved
@@ -1318,7 +1358,7 @@ function GeneratePage({
                 value={ttsForm.voice_id}
                 readOnly
                 className="readonly-input"
-                placeholder="Select a saved preset or clone"
+                placeholder="Select a design preset or saved clone"
               />
             </label>
           )}
@@ -1551,23 +1591,29 @@ function VoicesPage({
 
 function OmniVoiceSamplesPanel({ voices }) {
   const samples = voices.filter((voice) => voice.source_type === "cloned");
+  const presets = voices.filter((voice) => voice.source_type === "voice_design");
   return (
     <section className="panel provider-options-panel">
       <div className="panel-title-row">
         <div>
-          <h2>OmniVoice Voice Samples</h2>
-          <p>OmniVoice voices are uploaded sample sound files. Add one on the Clone page.</p>
+          <h2>OmniVoice Voices</h2>
+          <p>Accent presets use voice design; clones use uploaded or recorded samples.</p>
         </div>
         <Mic size={21} />
       </div>
       <div className="provider-note">
-        <strong>Voice = a sample; voice design = a speech context</strong>
-        <p>To generate, pick a voice sample <em>and</em> a speech context. Manage the voice design (instruct + settings) for each context from the bottom of the Generate page.</p>
+        <strong>Two generation modes</strong>
+        <p>Design presets use a strict speech-context instruction. Clones reproduce a saved sample and use the context's speed and quality settings.</p>
+      </div>
+      <div className="provider-chip-list" aria-label="Voice design presets">
+        {presets.map((voice) => (
+          <span key={voice.id}>{voice.display_name}</span>
+        ))}
       </div>
       {samples.length === 0 ? (
         <div className="empty-state compact-empty">
           <Mic size={26} />
-          <p>No voice samples yet. Upload one on the Clone page.</p>
+          <p>No cloned samples yet. The American and Indian design presets are ready above.</p>
         </div>
       ) : (
         <div className="provider-chip-list" aria-label="Saved samples">
@@ -1583,7 +1629,7 @@ function OmniVoiceSamplesPanel({ voices }) {
 function contextToForm(ctx) {
   const s = (ctx && ctx.settings) || {};
   return {
-    instruct: ctx?.instruct ?? "neutral, conversational",
+    instruct: ctx?.instruct ?? "american accent",
     language: ctx?.language ?? "",
     speed: s.speed ?? 1.0,
     duration: s.duration ?? 0,
@@ -1611,6 +1657,7 @@ function OmniVoiceContextEditor({
   const [previewUrl, setPreviewUrl] = useState("");
   const [previewing, setPreviewing] = useState(false);
   const [localError, setLocalError] = useState("");
+  const [expanded, setExpanded] = useState(false);
 
   useEffect(() => {
     setForm(contextToForm(selected));
@@ -1689,91 +1736,104 @@ function OmniVoiceContextEditor({
   }
 
   return (
-    <section className="panel tone-panel">
-      <div className="panel-title-row">
-        <div>
-          <h2>Voice Design — Speech Context</h2>
-          <p>The selected context's design is applied to the chosen voice sample. Edit, preview, and save.</p>
-        </div>
-        <Wand2 size={20} />
-      </div>
-
-      <div className="tone-context-row">
-        <label className="tone-field">
-          Speech context
-          <select value={selectedId || ""} onChange={(event) => onSelect(event.target.value)}>
-            {contexts.length === 0 && <option value="">No contexts</option>}
-            {contexts.map((c) => (
-              <option key={c.id} value={c.id}>{c.name}</option>
-            ))}
-          </select>
-        </label>
-        {selected && contexts.length > 1 && (
-          <button type="button" className="voice-icon-button" title="Delete this context" onClick={() => deleteContext(selected.id)}>
-            <Trash2 size={15} />
-          </button>
-        )}
-      </div>
-
-      <label className="tone-field tone-wide">
-        Instruct (voice design attributes)
-        <input
-          value={form.instruct}
-          onChange={(event) => update("instruct", event.target.value)}
-          placeholder="male, american accent, middle-aged, very high pitch"
-        />
-      </label>
-
-      <div className="tone-grid">
-        <label className="tone-field">
-          Language
-          <input value={form.language} onChange={(event) => update("language", event.target.value)} placeholder="Auto" />
-        </label>
-        <label className="tone-field">
-          Speed ({Number(form.speed).toFixed(2)})
-          <input type="range" min="0.5" max="1.5" step="0.05" value={form.speed} onChange={(event) => update("speed", event.target.value)} />
-        </label>
-        <label className="tone-field">
-          Duration (s, 0 = use speed)
-          <input type="number" min="0" step="1" value={form.duration} onChange={(event) => update("duration", event.target.value)} />
-        </label>
-        <label className="tone-field">
-          Inference steps ({form.num_step})
-          <input type="range" min="4" max="64" step="1" value={form.num_step} onChange={(event) => update("num_step", event.target.value)} />
-        </label>
-        <label className="tone-field">
-          Guidance scale ({Number(form.guidance_scale).toFixed(1)})
-          <input type="range" min="0" max="4" step="0.1" value={form.guidance_scale} onChange={(event) => update("guidance_scale", event.target.value)} />
-        </label>
-      </div>
-
-      <div className="tone-toggles">
-        <label><input type="checkbox" checked={form.denoise} onChange={(e) => update("denoise", e.target.checked)} /> Denoise</label>
-        <label><input type="checkbox" checked={form.preprocess_prompt} onChange={(e) => update("preprocess_prompt", e.target.checked)} /> Preprocess prompt</label>
-        <label><input type="checkbox" checked={form.postprocess_output} onChange={(e) => update("postprocess_output", e.target.checked)} /> Postprocess output</label>
-      </div>
-
-      <div className="tone-actions">
-        <button type="button" className="secondary-button" onClick={handlePreview} disabled={previewing || !form.instruct.trim()}>
-          <Play size={16} />
-          {previewing ? "Generating..." : "Preview design"}
-        </button>
-        {previewUrl && <audio controls src={previewUrl} />}
-      </div>
-
-      {localError && <p className="login-error">{localError}</p>}
-
-      <div className="tone-save-row">
-        <button type="button" className="secondary-button" onClick={handleSaveChanges} disabled={busy === "save-context" || !selected}>
-          <Save size={16} />
-          Save changes
-        </button>
-        <input className="tone-name-input" value={newName} onChange={(event) => setNewName(event.target.value)} placeholder="New context name" />
-        <button type="button" className="primary-button" onClick={handleSaveNew} disabled={busy === "save-context" || !newName.trim()}>
-          <Plus size={16} />
-          Add new
+    <section className={`panel tone-panel ${expanded ? "expanded" : "collapsed"}`}>
+      <div className="tone-collapsible-header">
+        <h2>Voice Design — Speech Context</h2>
+        <button
+          type="button"
+          className="icon-button"
+          onClick={() => setExpanded((current) => !current)}
+          aria-expanded={expanded}
+          aria-label={expanded ? "Collapse Voice Design — Speech Context" : "Expand Voice Design — Speech Context"}
+          title={expanded ? "Collapse" : "Expand"}
+        >
+          {expanded ? <ChevronDown size={18} /> : <ChevronRight size={18} />}
         </button>
       </div>
+
+      {expanded && (
+        <>
+          <p className="tone-help">
+            Design presets use the instruction below. Saved clones use only these speed and quality settings.
+          </p>
+          <div className="tone-context-row">
+            <label className="tone-field">
+              Speech context
+              <select value={selectedId || ""} onChange={(event) => onSelect(event.target.value)}>
+                {contexts.length === 0 && <option value="">No contexts</option>}
+                {contexts.map((c) => (
+                  <option key={c.id} value={c.id}>{c.name}</option>
+                ))}
+              </select>
+            </label>
+            {selected && !OMNIVOICE_BUILTIN_CONTEXT_IDS.has(selected.id) && (
+              <button type="button" className="voice-icon-button" title="Delete this context" onClick={() => deleteContext(selected.id)}>
+                <Trash2 size={15} />
+              </button>
+            )}
+          </div>
+
+          <label className="tone-field tone-wide">
+            Instruct (voice design attributes)
+            <input
+              value={form.instruct}
+              onChange={(event) => update("instruct", event.target.value)}
+              placeholder="american accent"
+            />
+          </label>
+
+          <div className="tone-grid">
+            <label className="tone-field">
+              Language
+              <input value={form.language} onChange={(event) => update("language", event.target.value)} placeholder="Auto" />
+            </label>
+            <label className="tone-field">
+              Speed ({Number(form.speed).toFixed(2)})
+              <input type="range" min="0.5" max="1.5" step="0.05" value={form.speed} onChange={(event) => update("speed", event.target.value)} />
+            </label>
+            <label className="tone-field">
+              Duration (s, 0 = use speed)
+              <input type="number" min="0" step="1" value={form.duration} onChange={(event) => update("duration", event.target.value)} />
+            </label>
+            <label className="tone-field">
+              Inference steps ({form.num_step})
+              <input type="range" min="4" max="64" step="1" value={form.num_step} onChange={(event) => update("num_step", event.target.value)} />
+            </label>
+            <label className="tone-field">
+              Guidance scale ({Number(form.guidance_scale).toFixed(1)})
+              <input type="range" min="0" max="4" step="0.1" value={form.guidance_scale} onChange={(event) => update("guidance_scale", event.target.value)} />
+            </label>
+          </div>
+
+          <div className="tone-toggles">
+            <label><input type="checkbox" checked={form.denoise} onChange={(e) => update("denoise", e.target.checked)} /> Denoise</label>
+            <label><input type="checkbox" checked={form.preprocess_prompt} onChange={(e) => update("preprocess_prompt", e.target.checked)} /> Preprocess prompt</label>
+            <label><input type="checkbox" checked={form.postprocess_output} onChange={(e) => update("postprocess_output", e.target.checked)} /> Postprocess output</label>
+          </div>
+
+          <div className="tone-actions">
+            <button type="button" className="secondary-button" onClick={handlePreview} disabled={previewing || !form.instruct.trim()}>
+              <Play size={16} />
+              {previewing ? "Generating..." : "Preview design"}
+            </button>
+            {previewUrl && <audio controls src={previewUrl} />}
+          </div>
+
+          {localError && <p className="login-error">{localError}</p>}
+
+          <div className="tone-save-row">
+            <button type="button" className="secondary-button" onClick={handleSaveChanges} disabled={busy === "save-context" || !selected}>
+              <Save size={16} />
+              Save changes
+            </button>
+            <input className="tone-name-input" value={newName} onChange={(event) => setNewName(event.target.value)} placeholder="New context name" />
+            <button type="button" className="primary-button" onClick={handleSaveNew} disabled={busy === "save-context" || !newName.trim()}>
+              <Plus size={16} />
+              Add new
+            </button>
+          </div>
+        </>
+      )}
     </section>
   );
 }
@@ -2179,6 +2239,146 @@ function ClonePage({ activeProvider, cloneForm, setCloneForm, cloneVoice, busy, 
         busy={busy}
         accents={accents}
       />
+    </section>
+  );
+}
+
+function RulesPage({ text, onApply }) {
+  const [value, setValue] = useState(text || "");
+  const [result, setResult] = useState(null);
+  const [checking, setChecking] = useState(false);
+  const [localError, setLocalError] = useState("");
+
+  async function checkText(event) {
+    event.preventDefault();
+    setChecking(true);
+    setLocalError("");
+    setResult(null);
+    try {
+      const payload = await apiJson(apiPath("omnivoice", "/text-rules/check"), {
+        method: "POST",
+        body: JSON.stringify({ text: value })
+      });
+      setResult(payload);
+    } catch (error) {
+      setLocalError(error.message);
+    } finally {
+      setChecking(false);
+    }
+  }
+
+  return (
+    <section className="rules-layout">
+      <form className="panel rules-checker" onSubmit={checkText}>
+        <div className="panel-heading">
+          <div>
+            <h2>Check Text</h2>
+            <p>Review pronunciation-sensitive slash usage before OmniVoice receives the message.</p>
+          </div>
+          <ListChecks size={21} />
+        </div>
+        <label>
+          Message text
+          <textarea
+            rows={10}
+            value={value}
+            onChange={(event) => {
+              setValue(event.target.value);
+              setResult(null);
+            }}
+            placeholder="Paste the exact text that should be spoken."
+          />
+        </label>
+        <div className="rules-actions">
+          <button type="submit" className="primary-button" disabled={checking || !value.trim()}>
+            <ListChecks size={16} />
+            {checking ? "Checking..." : "Check readiness"}
+          </button>
+          <button
+            type="button"
+            className="secondary-button"
+            disabled={!text || text === value}
+            onClick={() => {
+              setValue(text);
+              setResult(null);
+            }}
+          >
+            Use Generate text
+          </button>
+        </div>
+        {localError && <p className="login-error">{localError}</p>}
+      </form>
+
+      <section className="panel rules-reference">
+        <div className="panel-title-row">
+          <div>
+            <h2>Active Rules</h2>
+            <p>Generation is blocked until the original text contains no slash characters.</p>
+          </div>
+        </div>
+        <div className="rule-row">
+          <strong>Date</strong>
+          <code>15/12/2025</code>
+          <span>15th December, 2025</span>
+        </div>
+        <div className="rule-row">
+          <strong>Uppercase shorthand</strong>
+          <code>PE/VC</code>
+          <span>PE VC</span>
+        </div>
+        <div className="rule-row">
+          <strong>Other slash usage</strong>
+          <code>/</code>
+          <span>Replace manually with words or punctuation.</span>
+        </div>
+      </section>
+
+      {result && (
+        <section className={`panel rules-result ${result.ready ? "ready" : "blocked"}`}>
+          <div className="rules-result-heading">
+            {result.ready ? <CheckCircle2 size={20} /> : <AlertCircle size={20} />}
+            <div>
+              <h2>{result.ready ? "Ready for OmniVoice" : "Review required"}</h2>
+              <p>
+                {result.ready
+                  ? "No blocking text rules were found."
+                  : "Apply the suggestion or edit the remaining slash usage before generation."}
+              </p>
+            </div>
+          </div>
+          {result.errors.map((message) => (
+            <p className="rule-error" key={message}>{message}</p>
+          ))}
+          {result.changes.length > 0 && (
+            <div className="rule-changes">
+              {result.changes.map((change, index) => (
+                <div key={`${change.rule}-${index}`}>
+                  <code>{change.original}</code>
+                  <span>becomes</span>
+                  <strong>{change.replacement}</strong>
+                </div>
+              ))}
+            </div>
+          )}
+          {result.suggested_text !== result.original_text && (
+            <>
+              <label>
+                Suggested text
+                <textarea readOnly rows={6} value={result.suggested_text} />
+              </label>
+              <button
+                type="button"
+                className="primary-button"
+                disabled={result.suggested_text.includes("/")}
+                onClick={() => onApply(result.suggested_text)}
+              >
+                <CheckCircle2 size={16} />
+                Apply to Generate
+              </button>
+            </>
+          )}
+        </section>
+      )}
     </section>
   );
 }

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import base64
 import io
 import os
 import sys
@@ -141,22 +142,46 @@ class FakeDurationService:
 
 
 class FakeAudioExportService:
+    def export_mp3(self, input_wav: Path, output_mp3: Path) -> None:
+        output_mp3.write_bytes(b"fake-mp3-bytes")
+
     def export_linkedin_m4a(self, input_mp3: Path, output_m4a: Path) -> None:
         output_m4a.write_bytes(b"fake-m4a-bytes")
 
 
-def make_batch_workbook() -> bytes:
+class FakeOmniVoice:
+    async def run_batch(self, payload: dict[str, Any] | str) -> dict[str, Any]:
+        if isinstance(payload, str):
+            raise AssertionError("Smoke tests expect a decoded OmniVoice payload")
+        return {
+            "results": [
+                {
+                    "status": "success",
+                    "audio_b64": base64.b64encode(b"fake-wav-bytes").decode("ascii"),
+                    "duration": 4.2,
+                }
+                for _item in payload.get("items", [])
+            ]
+        }
+
+
+def make_batch_workbook(
+    *,
+    voice_id: str = "premade_us_voice",
+    speech_context: str = "outreach_conversational",
+    text: str = "Batch test message.",
+) -> bytes:
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "tts_requests"
     sheet.append(["text", "voice_id", "voice_name", "accent", "speech_context", "target_seconds", "wpm", "export_m4a"])
     sheet.append(
         [
-            "Batch test message.",
-            "premade_us_voice",
-            "QA Premade American",
+            text,
+            voice_id,
+            "QA Voice",
             "us",
-            "outreach_conversational",
+            speech_context,
             55,
             135,
             True,
@@ -180,6 +205,7 @@ def main() -> int:
         from app import main as app_module
 
         app_module.elevenlabs = FakeElevenLabs()
+        app_module._clients["omnivoice"] = FakeOmniVoice()
         app_module.duration_service = FakeDurationService()
         app_module.audio_export_service = FakeAudioExportService()
 
@@ -226,11 +252,14 @@ def main() -> int:
             call("POST", "/api/auth/development", "/api/auth/development")
             call("POST", "/api/auth/logout", "/api/auth/logout")
 
-            call("GET", "/api/voices", "/api/voices", headers=api_headers)
+            call("GET", "/api/{provider}/health", "/api/elevenlabs/health")
+            call("GET", "/api/{provider}/health", "/api/omnivoice/health")
+
+            call("GET", "/api/{provider}/voices", "/api/elevenlabs/voices", headers=api_headers)
             manual_voice = call(
                 "POST",
-                "/api/voices",
-                "/api/voices",
+                "/api/{provider}/voices",
+                "/api/elevenlabs/voices",
                 headers=api_headers,
                 json={
                     "display_name": "Manual QA Voice",
@@ -242,33 +271,43 @@ def main() -> int:
             ).json()
             call(
                 "GET",
-                "/api/voices/{record_id}/preview",
-                f"/api/voices/{manual_voice['id']}/preview",
+                "/api/{provider}/voices/{record_id}/preview",
+                f"/api/elevenlabs/voices/{manual_voice['id']}/preview",
                 expected=(307, 302),
                 headers=api_headers,
                 follow_redirects=False,
             )
-            call("DELETE", "/api/voices/{record_id}", f"/api/voices/{manual_voice['id']}", headers=api_headers)
+            call(
+                "DELETE",
+                "/api/{provider}/voices/{record_id}",
+                f"/api/elevenlabs/voices/{manual_voice['id']}",
+                headers=api_headers,
+            )
 
             premade_page = call(
                 "GET",
-                "/api/elevenlabs/voices",
-                "/api/elevenlabs/voices?page=0&page_size=10&sort=trending&accent=us&premade_only=true",
+                "/api/{provider}/voices/options",
+                "/api/elevenlabs/voices/options?page=0&page_size=10&sort=trending&accent=us&premade_only=true",
                 headers=api_headers,
             ).json()
             assert premade_page["voices"], "Expected premade voices"
             shared_page = call(
                 "GET",
-                "/api/elevenlabs/voices",
-                "/api/elevenlabs/voices?page=0&page_size=10&sort=most_users&accent=us&premade_only=false",
+                "/api/{provider}/voices/options",
+                "/api/elevenlabs/voices/options?page=0&page_size=10&sort=most_users&accent=us&premade_only=false",
                 headers=api_headers,
             ).json()
             assert shared_page["voices"], "Expected shared voices"
-            call("DELETE", "/api/elevenlabs/voices/cache", "/api/elevenlabs/voices/cache", headers=api_headers)
+            call(
+                "DELETE",
+                "/api/{provider}/voices/cache",
+                "/api/elevenlabs/voices/cache",
+                headers=api_headers,
+            )
 
             by_id_voice = call(
                 "POST",
-                "/api/elevenlabs/voices/by-id",
+                "/api/{provider}/voices/by-id",
                 "/api/elevenlabs/voices/by-id",
                 headers=api_headers,
                 json={"voice_id": "raw_provider_voice"},
@@ -278,8 +317,8 @@ def main() -> int:
             picked_premade = premade_page["voices"][0]
             call(
                 "POST",
-                "/api/elevenlabs/voices/{voice_id}",
-                f"/api/elevenlabs/voices/{picked_premade['id']}",
+                "/api/{provider}/voice-options/{voice_id}/save",
+                f"/api/elevenlabs/voice-options/{picked_premade['id']}/save",
                 headers=api_headers,
                 json={
                     "public_owner_id": picked_premade.get("public_owner_id"),
@@ -290,8 +329,8 @@ def main() -> int:
             picked_shared = shared_page["voices"][0]
             call(
                 "POST",
-                "/api/elevenlabs/voices/{voice_id}",
-                f"/api/elevenlabs/voices/{picked_shared['id']}",
+                "/api/{provider}/voice-options/{voice_id}/save",
+                f"/api/elevenlabs/voice-options/{picked_shared['id']}/save",
                 headers=api_headers,
                 json={
                     "public_owner_id": picked_shared.get("public_owner_id"),
@@ -299,12 +338,17 @@ def main() -> int:
                     "accent": picked_shared["accent"],
                 },
             )
-            call("POST", "/api/voices/sync", "/api/voices/sync", headers=api_headers)
+            call(
+                "POST",
+                "/api/{provider}/voices/sync",
+                "/api/elevenlabs/voices/sync",
+                headers=api_headers,
+            )
 
             call(
                 "POST",
-                "/api/voices/clone",
-                "/api/voices/clone",
+                "/api/{provider}/voices/clone",
+                "/api/elevenlabs/voices/clone",
                 headers=api_headers,
                 data={"name": "Cloned QA Voice", "accent": "us", "consent_confirmed": "true", "description": "QA clone"},
                 files={"sample": ("sample.mp3", b"sample-audio", "audio/mpeg")},
@@ -312,8 +356,8 @@ def main() -> int:
 
             tts_result = call(
                 "POST",
-                "/api/tts",
-                "/api/tts",
+                "/api/{provider}/tts",
+                "/api/elevenlabs/tts",
                 headers=api_headers,
                 json={
                     "text": "Single endpoint test message.",
@@ -330,8 +374,9 @@ def main() -> int:
 
             call(
                 "POST",
-                "/api/tts/batch",
-                "/api/tts/batch",
+                "/api/{provider}/tts/batch",
+                "/api/elevenlabs/tts/batch",
+                expected=202,
                 headers=api_headers,
                 files={
                     "file": (
@@ -342,22 +387,148 @@ def main() -> int:
                 },
             )
 
-            jobs = call("GET", "/api/jobs", "/api/jobs", headers=api_headers).json()
+            jobs = call(
+                "GET",
+                "/api/{provider}/jobs",
+                "/api/elevenlabs/jobs",
+                headers=api_headers,
+            ).json()
             assert jobs, "Expected at least one job"
             job_id = tts_result["job_id"]
-            call("GET", "/api/jobs/{job_id}", f"/api/jobs/{job_id}", headers=api_headers)
+            call(
+                "GET",
+                "/api/{provider}/jobs/{job_id}",
+                f"/api/elevenlabs/jobs/{job_id}",
+                headers=api_headers,
+            )
             zip_response = call(
                 "GET",
-                "/api/jobs/{job_id}/download",
-                f"/api/jobs/{job_id}/download",
+                "/api/{provider}/jobs/{job_id}/download",
+                f"/api/elevenlabs/jobs/{job_id}/download",
                 headers=api_headers,
             )
             with zipfile.ZipFile(io.BytesIO(zip_response.content)) as archive:
                 assert archive.namelist(), "Expected files in job ZIP"
 
             transcript_url = tts_result["transcript_url"]
-            assert transcript_url and transcript_url.startswith("/files/")
-            call("GET", "/files/{relative_path}", transcript_url, headers=api_headers)
+            assert transcript_url and transcript_url.startswith("/api/elevenlabs/files/")
+            call("GET", "/api/{provider}/files/{relative_path}", transcript_url, headers=api_headers)
+
+            omnivoice_voices = call(
+                "GET",
+                "/api/{provider}/voices",
+                "/api/omnivoice/voices",
+                headers=api_headers,
+            ).json()
+            assert len(omnivoice_voices) >= 2, "Expected seeded OmniVoice design presets"
+            call(
+                "POST",
+                "/api/{provider}/voices/sync",
+                "/api/omnivoice/voices/sync",
+                headers=api_headers,
+            )
+            contexts = call(
+                "GET",
+                "/api/{provider}/speech-contexts",
+                "/api/omnivoice/speech-contexts",
+                headers=api_headers,
+            ).json()
+            assert {context["id"] for context in contexts} >= {"english_american", "english_indian"}
+            rules = call(
+                "POST",
+                "/api/{provider}/text-rules/check",
+                "/api/omnivoice/text-rules/check",
+                headers=api_headers,
+                json={"text": "A date like 15/12/2025 needs review."},
+            ).json()
+            assert not rules["ready"]
+            assert rules["suggested_text"] == "A date like 15th December, 2025 needs review."
+
+            custom_context = call(
+                "POST",
+                "/api/{provider}/speech-contexts",
+                "/api/omnivoice/speech-contexts",
+                headers=api_headers,
+                json={
+                    "name": "QA Context",
+                    "instruct": "american accent",
+                    "language": "en",
+                    "settings": {"speed": 1.0, "num_step": 8, "guidance_scale": 1.5},
+                },
+            ).json()
+            call(
+                "POST",
+                "/api/{provider}/speech-contexts/preview",
+                "/api/omnivoice/speech-contexts/preview",
+                headers=api_headers,
+                json={
+                    "text": "Preview this design.",
+                    "instruct": "american accent",
+                    "language": "en",
+                    "settings": {"speed": 1.0, "num_step": 8, "guidance_scale": 1.5},
+                },
+            )
+            call(
+                "DELETE",
+                "/api/{provider}/speech-contexts/{context_id}",
+                f"/api/omnivoice/speech-contexts/{custom_context['id']}",
+                headers=api_headers,
+            )
+
+            cloned_omnivoice = call(
+                "POST",
+                "/api/{provider}/voices/clone",
+                "/api/omnivoice/voices/clone",
+                headers=api_headers,
+                data={
+                    "name": "OmniVoice QA Clone",
+                    "accent": "us",
+                    "consent_confirmed": "true",
+                    "description": "Local QA clone",
+                    "reference_text": "This is the reference transcript.",
+                },
+                files={"sample": ("sample.wav", b"sample-audio", "audio/wav")},
+            ).json()
+            assert cloned_omnivoice["provider_metadata"]["reference_text"] == "This is the reference transcript."
+
+            american_preset = next(
+                voice for voice in omnivoice_voices if voice["voice_id"] == "ov_design_english_american"
+            )
+            omnivoice_tts = call(
+                "POST",
+                "/api/{provider}/tts",
+                "/api/omnivoice/tts",
+                headers=api_headers,
+                json={
+                    "text": "OmniVoice endpoint test message.",
+                    "voice_id": american_preset["voice_id"],
+                    "voice_name": american_preset["display_name"],
+                    "accent": "us",
+                    "speech_context": "english_american",
+                    "target_seconds": 55,
+                    "wpm": 135,
+                    "export_m4a": True,
+                },
+            ).json()
+            assert omnivoice_tts["status"] == "completed"
+            call(
+                "POST",
+                "/api/{provider}/tts/batch",
+                "/api/omnivoice/tts/batch",
+                expected=202,
+                headers=api_headers,
+                files={
+                    "file": (
+                        "omnivoice_requests.xlsx",
+                        make_batch_workbook(
+                            voice_id=american_preset["voice_id"],
+                            speech_context="english_american",
+                            text="OmniVoice batch test message.",
+                        ),
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    )
+                },
+            )
 
             visible_operations = {
                 (method.upper(), path)

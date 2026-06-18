@@ -21,12 +21,17 @@ For the OmniVoice Hugging Face Space integration, the backend now also accepts:
 - `HUGGINGFACE_TOKEN`
 - `OMNIVOICE_BASE_URL`
 - `OMNIVOICE_TIMEOUT_SECONDS`
+- `OMNIVOICE_BATCH_CHUNK` (1-20 rows per upstream batch request; defaults to 6)
 
 The product now supports provider-scoped flows for both ElevenLabs and OmniVoice. OmniVoice uses curated preset voices plus local sample-based clones, and its voice-design prompts intentionally stay close to the upstream supported attribute format.
+
+OmniVoice includes built-in American and Indian design presets plus a `/omnivoice/rules` checker. Generation is blocked when text still contains `/`; recognized dates such as `15/12/2025` and uppercase shorthand such as `PE/VC` receive reviewable spoken-text suggestions before the user applies them.
 
 For a shared server, set `HOST_BIND=127.0.0.1` and an unused `HOST_PORT` such as `8011`, then point the existing HTTPS reverse proxy to that local port. The generated audio and saved voices persist under `./data`.
 
 The UI is split into provider-scoped task pages such as `/elevenlabs/generate`, `/elevenlabs/voices`, `/omnivoice/clone`, and `/omnivoice/history`. Authenticated downloads use `/api/{provider}/files/...`.
+
+The full API surface is documented in [docs/API.md](docs/API.md); interactive Swagger UI is served at `/docs`.
 
 The browser receives only the public Google client ID. Google credentials are verified by FastAPI, and generation, cloning, voice registry, batch, and saved-file routes require the signed session cookie.
 

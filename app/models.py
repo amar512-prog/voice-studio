@@ -210,6 +210,24 @@ class OmniVoiceContextPreview(BaseModel):
     duration: float | None = Field(default=None, description="Reported duration in seconds when available.")
 
 
+class OmniVoiceTextRuleRequest(BaseModel):
+    text: str = Field(min_length=1, description="Text to check before OmniVoice generation.")
+
+
+class OmniVoiceTextRuleChange(BaseModel):
+    rule: str = Field(description="Stable rule id that produced the suggestion.")
+    original: str = Field(description="Original matched text.")
+    replacement: str = Field(description="Suggested spoken-text replacement.")
+
+
+class OmniVoiceTextRuleResponse(BaseModel):
+    ready: bool = Field(description="True when the original text contains no blocking OmniVoice rule violations.")
+    original_text: str = Field(description="Submitted text.")
+    suggested_text: str = Field(description="Reviewable suggestion with recognized slash patterns rewritten.")
+    changes: list[OmniVoiceTextRuleChange] = Field(description="Deterministic replacements proposed by the checker.")
+    errors: list[str] = Field(description="Blocking rule messages. Empty when ready is true.")
+
+
 class TtsRequest(BaseModel):
     text: str = Field(min_length=1, description="Text to synthesize into one voice note.")
     voice_id: str = Field(min_length=1, description="ElevenLabs voice id to use.")

@@ -31,6 +31,8 @@ from app.models import (
     OmniVoiceContextPreview,
     OmniVoiceContextPreviewRequest,
     OmniVoiceContextRequest,
+    OmniVoiceTextRuleRequest,
+    OmniVoiceTextRuleResponse,
     LogoutResponse,
     ProviderVoiceByIdRequest,
     ProviderVoiceOption,
@@ -46,6 +48,11 @@ from app.services.audio_export import AudioExportService
 from app.services.duration import DurationService
 from app.services.elevenlabs import ElevenLabsClient, ElevenLabsError
 from app.services.omnivoice import OmniVoiceClient, OmniVoiceError
+from app.services.omnivoice_text_rules import (
+    OmniVoiceTextRuleError,
+    check_omnivoice_text,
+    require_omnivoice_text_ready,
+)
 from app.services.speech_context import CONTEXT_LABELS, CONTEXT_NOTES
 from app.services.storage import StorageService, new_id, now_utc, safe_filename
 from app.services.voice_filter import ProviderVoiceProfile, provider_voice_profile, provider_voice_rank
@@ -106,28 +113,12 @@ PROVIDER_PAGE_SIZE_MAX = 100
 _shared_page_cache: dict[str, dict] = {}
 _shared_voice_cache: dict[str, dict] = {}
 
-# Default OmniVoice speech contexts seeded on first use. "outreach" mirrors the
-# OmniVoice Demo PDF. Users add/modify contexts from the Generate voice editor.
+# Default OmniVoice design contexts use only attributes accepted by upstream.
 OMNIVOICE_DEFAULT_CONTEXTS = [
     {
-        "id": "outreach",
-        "name": "Outreach",
-        "instruct": "male, american accent, middle-aged, very high pitch",
-        "language": None,
-        "settings": {
-            "speed": 1.1,
-            "duration": None,
-            "num_step": 64,
-            "guidance_scale": 4.0,
-            "denoise": True,
-            "preprocess_prompt": True,
-            "postprocess_output": True,
-        },
-    },
-    {
-        "id": "conversational",
-        "name": "Conversational",
-        "instruct": "neutral, conversational, american accent",
+        "id": "english_american",
+        "name": "English - American",
+        "instruct": "american accent",
         "language": None,
         "settings": {
             "speed": 1.0,
@@ -138,6 +129,35 @@ OMNIVOICE_DEFAULT_CONTEXTS = [
             "preprocess_prompt": True,
             "postprocess_output": True,
         },
+    },
+    {
+        "id": "english_indian",
+        "name": "English - Indian",
+        "instruct": "indian accent",
+        "language": None,
+        "settings": {
+            "speed": 1.0,
+            "duration": None,
+            "num_step": 32,
+            "guidance_scale": 2.0,
+            "denoise": True,
+            "preprocess_prompt": True,
+            "postprocess_output": True,
+        },
+    },
+]
+OMNIVOICE_PRESET_VOICES = [
+    {
+        "display_name": "English - American",
+        "voice_id": "ov_design_english_american",
+        "accent": "us",
+        "context_id": "english_american",
+    },
+    {
+        "display_name": "English - Indian",
+        "voice_id": "ov_design_english_indian",
+        "accent": "in",
+        "context_id": "english_indian",
     },
 ]
 
@@ -232,6 +252,11 @@ async def lifespan(_app: FastAPI):
     # Seed OmniVoice speech contexts once at startup (avoids a first-request race).
     if "omnivoice" in PROVIDERS:
         _load_omnivoice_contexts()
+        omnivoice_store = storage_for("omnivoice")
+        preset_marker = omnivoice_store.root / "presets-v1.json"
+        if not preset_marker.exists():
+            _sync_omnivoice_presets(registry_for("omnivoice"))
+            omnivoice_store.write_json(preset_marker, {"seeded": True})
     yield
 
 
@@ -482,6 +507,29 @@ def add_voice(provider: str, request: VoiceCreateRequest, _user: dict = Depends(
     """
     provider = validate_provider(provider)
     return registry_for(provider).upsert(request)
+
+
+@app.delete(
+    "/api/{provider}/voices/cache",
+    response_model=CacheClearResponse,
+    tags=["Voices"],
+    summary="Clear the voice-library cache",
+    response_description="Count of in-memory voice-library cache entries removed.",
+)
+def clear_provider_voice_cache(provider: str, _user: dict = Depends(current_user)) -> dict:
+    """
+    Clear cached shared voice-library pages and cached shared voice records.
+
+    This static route must be registered before `/voices/{record_id}` so FastAPI
+    does not interpret `cache` as a voice record id.
+    """
+    provider = validate_provider(provider)
+    if provider != "elevenlabs":
+        raise HTTPException(status_code=404, detail="Voice-library caching is available only for ElevenLabs.")
+    cleared = len(_shared_page_cache) + len(_shared_voice_cache)
+    _shared_page_cache.clear()
+    _shared_voice_cache.clear()
+    return {"ok": True, "cleared": cleared}
 
 
 @app.delete(
@@ -798,29 +846,6 @@ async def list_provider_voice_options(
     )
 
 
-@app.delete(
-    "/api/{provider}/voices/cache",
-    response_model=CacheClearResponse,
-    tags=["Voices"],
-    summary="Clear the voice-library cache",
-    response_description="Count of in-memory voice-library cache entries removed.",
-)
-def clear_provider_voice_cache(provider: str, _user: dict = Depends(current_user)) -> dict:
-    """
-    Clear cached shared voice-library pages and cached shared voice records.
-
-    Use this when ElevenLabs library results look stale, after changing filters,
-    or while debugging provider picker behavior.
-    """
-    provider = validate_provider(provider)
-    if provider != "elevenlabs":
-        raise HTTPException(status_code=404, detail="Voice-library caching is available only for ElevenLabs.")
-    cleared = len(_shared_page_cache) + len(_shared_voice_cache)
-    _shared_page_cache.clear()
-    _shared_voice_cache.clear()
-    return {"ok": True, "cleared": cleared}
-
-
 def _map_accent(value: object) -> str | None:
     normalized = str(value or "").strip().lower()
     if normalized in {"american", "us", "usa", "united states", "general american"}:
@@ -1015,8 +1040,7 @@ async def sync_provider_voices(provider: str, _user: dict = Depends(current_user
     provider = validate_provider(provider)
     registry = registry_for(provider)
     if provider == "omnivoice":
-        # OmniVoice voices are uploaded sample clones only; nothing to sync.
-        return registry.list()
+        return _sync_omnivoice_presets(registry)
 
     synced: list[VoiceRecord] = []
     for _rank, voice, profile in await _eligible_provider_voices():
@@ -1062,6 +1086,29 @@ def _load_omnivoice_contexts() -> list[dict]:
     if not isinstance(contexts, list) or not contexts:
         contexts = [dict(ctx) for ctx in OMNIVOICE_DEFAULT_CONTEXTS]
         store.write_json(store.speech_contexts_path, contexts)
+        return contexts
+
+    changed = False
+    old_conversational = next(
+        (
+            context
+            for context in contexts
+            if context.get("id") == "conversational"
+            and context.get("instruct") == "neutral, conversational, american accent"
+        ),
+        None,
+    )
+    if old_conversational is not None:
+        contexts.remove(old_conversational)
+        changed = True
+
+    existing_ids = {str(context.get("id")) for context in contexts}
+    for default in OMNIVOICE_DEFAULT_CONTEXTS:
+        if default["id"] not in existing_ids:
+            contexts.append(dict(default))
+            changed = True
+    if changed:
+        store.write_json(store.speech_contexts_path, contexts)
     return contexts
 
 
@@ -1074,6 +1121,33 @@ def _get_omnivoice_context(context_id: str) -> dict | None:
     return next((ctx for ctx in _load_omnivoice_contexts() if ctx.get("id") == context_id), None)
 
 
+def _sync_omnivoice_presets(registry: VoiceRegistry) -> list[VoiceRecord]:
+    synced: list[VoiceRecord] = []
+    for preset in OMNIVOICE_PRESET_VOICES:
+        synced.append(
+            registry.upsert(
+                VoiceCreateRequest(
+                    display_name=preset["display_name"],
+                    voice_id=preset["voice_id"],
+                    source_type="voice_design",
+                    accent=preset["accent"],
+                    consent_status="not_required",
+                ),
+                provider_metadata={
+                    "provider": "omnivoice",
+                    "mode": "design",
+                    "context_id": preset["context_id"],
+                    "voice_message_studio_profile": {
+                        "language": "en",
+                        "accent": preset["accent"],
+                        "use_case": "conversational",
+                    },
+                },
+            )
+        )
+    return synced
+
+
 @app.get(
     "/api/{provider}/speech-contexts",
     response_model=list[OmniVoiceContext],
@@ -1084,6 +1158,30 @@ def _get_omnivoice_context(context_id: str) -> dict | None:
 def list_omnivoice_contexts(provider: str, _user: dict = Depends(current_user)) -> list[OmniVoiceContext]:
     _require_omnivoice(provider)
     return [OmniVoiceContext.model_validate(ctx) for ctx in _load_omnivoice_contexts()]
+
+
+@app.post(
+    "/api/{provider}/text-rules/check",
+    response_model=OmniVoiceTextRuleResponse,
+    tags=["Generate"],
+    summary="Check text for OmniVoice generation",
+    response_description="Blocking text-rule results plus deterministic spoken-text suggestions.",
+)
+def check_omnivoice_text_rules(
+    provider: str,
+    request: OmniVoiceTextRuleRequest,
+    _user: dict = Depends(current_user),
+) -> OmniVoiceTextRuleResponse:
+    """Check slash usage before OmniVoice generation without changing the submitted text."""
+    _require_omnivoice(provider)
+    result = check_omnivoice_text(request.text)
+    return OmniVoiceTextRuleResponse(
+        ready=result.ready,
+        original_text=result.original_text,
+        suggested_text=result.suggested_text,
+        changes=[change.__dict__ for change in result.changes],
+        errors=list(result.errors),
+    )
 
 
 @app.post(
@@ -1132,6 +1230,8 @@ def delete_omnivoice_context(
     _user: dict = Depends(current_user),
 ) -> OmniVoiceContext:
     _require_omnivoice(provider)
+    if context_id in {context["id"] for context in OMNIVOICE_DEFAULT_CONTEXTS}:
+        raise HTTPException(status_code=400, detail="Built-in OmniVoice accent presets cannot be deleted.")
     contexts = _load_omnivoice_contexts()
     removed = next((ctx for ctx in contexts if ctx.get("id") == context_id), None)
     if removed is None:
@@ -1154,6 +1254,10 @@ async def preview_omnivoice_context(
 ) -> OmniVoiceContextPreview:
     """Design-only preview (no sample): synthesize from instruct + settings."""
     _require_omnivoice(provider)
+    try:
+        require_omnivoice_text_ready(request.text)
+    except OmniVoiceTextRuleError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     settings = _omnivoice_settings({"settings": request.settings.model_dump()})
     item: dict = {"text": request.text, "instruct": request.instruct, "language": str(request.language or "en")}
     if settings.get("speed") is not None:
@@ -1326,6 +1430,11 @@ async def create_tts(provider: str, request: TtsRequest, _user: dict = Depends(c
     warnings. Set `export_m4a=true` to also write a mono AAC `.m4a` file.
     """
     provider = validate_provider(provider)
+    if provider == "omnivoice":
+        try:
+            require_omnivoice_text_ready(request.text)
+        except OmniVoiceTextRuleError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     provider_storage = storage_for(provider)
     job_id = new_id("job")
     created_at = datetime.now(timezone.utc)
@@ -1417,7 +1526,7 @@ async def _generate_omnivoice_batch(
     for index, request in enumerate(requests, start=1):
         try:
             item, row_settings = _omnivoice_item(provider_storage, registry, request)
-        except OmniVoiceError as exc:
+        except (OmniVoiceError, OmniVoiceTextRuleError) as exc:
             results[index] = _failed_audio_row("omnivoice", job_id, index, request, exc, now_utc())
             continue
         top_level = _omnivoice_top_level(row_settings)
@@ -1554,6 +1663,20 @@ async def create_batch(
                 f"{settings.max_batch_rows}. Split it into smaller workbooks."
             ),
         )
+
+    if provider == "omnivoice":
+        rule_errors = []
+        for row_number, request in enumerate(requests, start=2):
+            try:
+                require_omnivoice_text_ready(request.text)
+            except OmniVoiceTextRuleError as exc:
+                rule_errors.append(f"Row {row_number}: {exc}")
+        if rule_errors:
+            shutil.rmtree(provider_storage.job_folder(job_id), ignore_errors=True)
+            preview = " | ".join(rule_errors[:10])
+            if len(rule_errors) > 10:
+                preview += f" | {len(rule_errors) - 10} more invalid row(s)."
+            raise HTTPException(status_code=400, detail=f"OmniVoice text rules failed. {preview}")
 
     total = len(requests)
     _write_job_progress(provider_storage, job_id, created_at, status="running", total_rows=total, rows=[])
@@ -1774,31 +1897,36 @@ def _omnivoice_top_level(settings: dict) -> dict:
 def _omnivoice_item(
     provider_storage: StorageService, registry: VoiceRegistry, request: TtsRequest
 ) -> tuple[dict, dict]:
-    """Build one OmniVoice batch item: a voice sample (clone) styled by a speech context.
-
-    OmniVoice generation needs both a saved voice (uploaded sample) and a speech
-    context (voice design + settings). `request.speech_context` carries the context id.
-    """
+    """Build one OmniVoice batch item for a design preset or a sample clone."""
+    require_omnivoice_text_ready(request.text)
     record = registry.find_by_provider_voice_id(request.voice_id)
-    if record is None or not record.source_audio_path:
-        raise OmniVoiceError("Select an uploaded OmniVoice voice sample before generating audio.")
-    context = _get_omnivoice_context(request.speech_context)
+    if record is None:
+        raise OmniVoiceError("Select a saved OmniVoice preset or uploaded voice sample before generating audio.")
+
+    voice_meta = record.provider_metadata or {}
+    mode = str(voice_meta.get("mode") or "clone")
+    context_id = str(voice_meta.get("context_id") or request.speech_context)
+    context = _get_omnivoice_context(context_id)
     if context is None:
         raise OmniVoiceError("Select a saved OmniVoice speech context before generating audio.")
 
-    voice_meta = record.provider_metadata or {}
     settings = _omnivoice_settings(context)
-    source_path = provider_storage.resolve_file(record.source_audio_path)
     item: dict = {
         "text": request.text,
-        "ref_audio_b64": base64.b64encode(source_path.read_bytes()).decode("ascii"),
         "language": str(context.get("language") or "en"),
     }
-    if voice_meta.get("reference_text"):
-        item["ref_text"] = str(voice_meta["reference_text"])
-    instruct = str(context.get("instruct") or "").strip()
-    if instruct:
+    if mode == "design":
+        instruct = str(context.get("instruct") or "").strip()
+        if not instruct:
+            raise OmniVoiceError("The selected OmniVoice design preset has no voice-design instruction.")
         item["instruct"] = instruct
+    else:
+        if not record.source_audio_path:
+            raise OmniVoiceError("The selected OmniVoice clone has no saved source sample.")
+        source_path = provider_storage.resolve_file(record.source_audio_path)
+        item["ref_audio_b64"] = base64.b64encode(source_path.read_bytes()).decode("ascii")
+        if voice_meta.get("reference_text"):
+            item["ref_text"] = str(voice_meta["reference_text"])
     if settings.get("speed") is not None:
         item["speed"] = settings["speed"]
     if settings.get("duration"):

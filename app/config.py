@@ -19,7 +19,7 @@ class Settings:
         self.omnivoice_timeout_seconds = max(30, int(os.getenv("OMNIVOICE_TIMEOUT_SECONDS", "240")))
         # Rows sent to the OmniVoice space per /batch call (true batched inference).
         # Keep modest so a single ZeroGPU request stays within its time budget.
-        self.omnivoice_batch_chunk = max(1, int(os.getenv("OMNIVOICE_BATCH_CHUNK", "6")))
+        self.omnivoice_batch_chunk = min(20, max(1, int(os.getenv("OMNIVOICE_BATCH_CHUNK", "6"))))
         self.max_duration_seconds = int(os.getenv("LINKEDIN_MAX_SECONDS", "60"))
         self.default_target_seconds = int(os.getenv("DEFAULT_TARGET_SECONDS", "55"))
         self.default_wpm = int(os.getenv("DEFAULT_WPM", "135"))
