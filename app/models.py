@@ -3,7 +3,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 
-Accent = Literal["us", "in", "neutral"]
+Accent = Literal["us", "in", "neutral", "auto"]
 SpeechContext = Literal[
     "outreach_conversational",
     "customer_support",
@@ -14,6 +14,14 @@ SpeechContext = Literal[
 ]
 VoiceSourceType = Literal["elevenlabs_library", "voice_design", "cloned", "manual"]
 ConsentStatus = Literal["not_required", "confirmed", "missing"]
+ProviderCapability = Literal[
+    "tts",
+    "batch",
+    "clone",
+    "presets",
+    "text_rules",
+    "voice_library",
+]
 
 
 class UserProfile(BaseModel):
@@ -52,6 +60,18 @@ class ConfigResponse(BaseModel):
     max_duration_seconds: int = Field(description="Hard LinkedIn duration limit.")
     contexts: list[ContextOption] = Field(description="Available speech contexts.")
     accents: list[AccentOption] = Field(description="Available accent buckets.")
+
+
+class ProviderInfo(BaseModel):
+    id: str = Field(description="Stable provider id used in provider-scoped API paths.")
+    name: str = Field(description="Human-readable provider name.")
+    configured: bool = Field(description="Whether the provider has the required server configuration.")
+    capabilities: list[ProviderCapability] = Field(description="Provider features supported by this application.")
+
+
+class ProvidersResponse(BaseModel):
+    default_provider: str = Field(description="Provider id selected by default for new frontend sessions.")
+    providers: list[ProviderInfo] = Field(description="Supported providers in preferred display order.")
 
 
 class CacheClearResponse(BaseModel):
@@ -153,15 +173,58 @@ class ProviderVoiceByIdRequest(BaseModel):
 class OmniVoiceToneSettings(BaseModel):
     """OmniVoice generation settings captured in a tone (maps to the Space payload)."""
 
-    speed: float = Field(1.0, ge=0.5, le=1.5, description="1.0 normal; >1 faster, <1 slower. Ignored if duration is set.")
-    duration: float | None = Field(
-        default=None, ge=0, description="Fixed seconds to override speed. 0/empty uses speed."
+    speed: float = Field(
+        1.0,
+        ge=0.5,
+        le=1.5,
+        multiple_of=0.05,
+        description=(
+            "Speech-rate multiplier from 0.5 to 1.5 in 0.05 increments. "
+            "Use 1.0 for normal speed, below 1.0 for slower speech with more pause, "
+            "or above 1.0 for faster speech. Ignored when duration is greater than 0."
+        ),
     )
-    num_step: int = Field(32, ge=4, le=64, description="Inference steps. Lower=faster, higher=quality.")
-    guidance_scale: float = Field(2.0, ge=0, le=4, description="Classifier-free guidance scale (CFG).")
-    denoise: bool = Field(True, description="Denoise the generated audio.")
-    preprocess_prompt: bool = Field(True, description="Trim/clean reference audio and reference text.")
-    postprocess_output: bool = Field(True, description="Remove long silences from the output.")
+    duration: float | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Fixed output duration in seconds. A value greater than 0 overrides speed; "
+            "use 0 or null to let speed control the audio duration."
+        ),
+    )
+    num_step: int = Field(
+        32,
+        ge=4,
+        le=64,
+        description=(
+            "Inference steps from 4 to 64. Higher values generally improve audio quality "
+            "but take longer to generate."
+        ),
+    )
+    guidance_scale: float = Field(
+        2.0,
+        ge=0,
+        le=4,
+        description=(
+            "Context-guidance strength from 0 to 4. Higher values make the model follow "
+            "the supplied voice design and generation context more strongly."
+        ),
+    )
+    denoise: bool = Field(
+        True,
+        description="When true, apply denoising to the generated audio.",
+    )
+    preprocess_prompt: bool = Field(
+        True,
+        description=(
+            "When true, remove silence and trim the reference audio, and append ending "
+            "punctuation to the reference text when it is missing."
+        ),
+    )
+    postprocess_output: bool = Field(
+        True,
+        description="When true, remove long silences from the generated audio.",
+    )
 
 
 class OmniVoiceContext(BaseModel):
@@ -177,19 +240,54 @@ class OmniVoiceContext(BaseModel):
 class OmniVoiceContextRequest(BaseModel):
     """Create or modify an OmniVoice speech context."""
 
-    id: str | None = Field(default=None, description="Existing context id to modify; omit to add a new one.")
-    name: str = Field(min_length=1, description="Context name shown in the picker.")
-    instruct: str = Field(min_length=1, description="Voice-design attributes for this context.")
-    language: str | None = Field(default=None, description="Language code, or null to auto-detect.")
-    settings: OmniVoiceToneSettings = Field(default_factory=OmniVoiceToneSettings)
+    id: str | None = Field(
+        default=None,
+        description="Existing speech-context id to update. Omit or use null to create a new context.",
+    )
+    name: str = Field(
+        min_length=1,
+        description=(
+            "Human-readable context name associated with the voice, clone owner, or intended voice persona."
+        ),
+        examples=["Amar outreach voice"],
+    )
+    instruct: str = Field(
+        description=(
+            "Optional comma-separated voice-design attributes. Leave empty for a clone-only context. "
+            "A non-empty value is required when using the context for voice design. Supported choices: "
+            "Gender: male or female; "
+            "Age: child, teenager, young adult, middle-aged, or elderly; "
+            "Pitch: very low pitch, low pitch, moderate pitch, high pitch, or very high pitch; "
+            "Style: whisper; "
+            "English accent: american accent or indian accent."
+        ),
+        examples=["male, young adult, moderate pitch, american accent"],
+    )
+    language: str | None = Field(
+        default=None,
+        description="Language code such as `en`, or null to let OmniVoice auto-detect the language.",
+        examples=["en"],
+    )
+    settings: OmniVoiceToneSettings = Field(
+        default_factory=OmniVoiceToneSettings,
+        description="OmniVoice generation-quality, timing, and audio-processing settings.",
+    )
 
     model_config = {
         "json_schema_extra": {
             "example": {
-                "name": "Outreach",
-                "instruct": "male, american accent, middle-aged, very high pitch",
-                "language": None,
-                "settings": {"speed": 1.1, "num_step": 64, "guidance_scale": 4.0},
+                "name": "Amar outreach voice",
+                "instruct": "male, young adult, moderate pitch, american accent",
+                "language": "en",
+                "settings": {
+                    "speed": 1.0,
+                    "duration": 0,
+                    "num_step": 64,
+                    "guidance_scale": 4.0,
+                    "denoise": True,
+                    "preprocess_prompt": True,
+                    "postprocess_output": True,
+                },
             }
         }
     }
@@ -199,7 +297,13 @@ class OmniVoiceContextPreviewRequest(BaseModel):
     """Preview a speech-context's design audio without saving (design-only, no sample)."""
 
     text: str = Field(min_length=1, description="Text to synthesize for the preview.")
-    instruct: str = Field(min_length=1, description="Voice-design attributes to preview.")
+    instruct: str = Field(
+        description=(
+            "Optional comma-separated voice-design attributes. Leave empty to let OmniVoice use "
+            "its model defaults based on the supplied text and language."
+        ),
+        examples=["male, young adult, moderate pitch, american accent", ""],
+    )
     language: str | None = Field(default=None, description="Language code, or null to auto-detect.")
     settings: OmniVoiceToneSettings = Field(default_factory=OmniVoiceToneSettings)
 
@@ -230,19 +334,30 @@ class OmniVoiceTextRuleResponse(BaseModel):
 
 class TtsRequest(BaseModel):
     text: str = Field(min_length=1, description="Text to synthesize into one voice note.")
-    voice_id: str = Field(min_length=1, description="ElevenLabs voice id to use.")
+    voice_id: str = Field(
+        min_length=1,
+        description=(
+            "Voice id to synthesize with. ElevenLabs: provider voice id. OmniVoice: saved "
+            "OmniVoice preset or cloned/sample voice id from the local registry."
+        ),
+    )
     voice_name: str | None = Field(default=None, description="Optional display name stored with the result.")
     accent: Accent = Field(default="neutral", description="Accent bucket recorded with the generated result.")
     speech_context: str = Field(
         default="outreach_conversational",
         description=(
-            "ElevenLabs: one of the built-in delivery contexts. OmniVoice: a saved "
-            "speech-context id carrying the voice design + generation settings."
+            "ElevenLabs: optional built-in delivery context; defaults to "
+            "`outreach_conversational`. OmniVoice: required saved speech-context id "
+            "carrying the voice design and generation settings, for example "
+            "`english_american` or `english_indian`."
         ),
     )
     target_seconds: int = Field(default=55, ge=1, le=60, description="Soft target duration for yellow warnings.")
     wpm: int = Field(default=135, ge=60, le=240, description="Words-per-minute estimate used before generation.")
-    export_m4a: bool = Field(default=False, description="Also export a LinkedIn-compatible mono AAC .m4a file.")
+    export_m4a: bool = Field(
+        default=True,
+        description="Defaults to true. Also export a LinkedIn-compatible mono AAC .m4a file.",
+    )
 
     model_config = {
         "json_schema_extra": {
@@ -258,6 +373,54 @@ class TtsRequest(BaseModel):
             }
         }
     }
+
+
+class TtsApiRequest(BaseModel):
+    """Public /tts request body shown in Swagger."""
+
+    text: str = Field(min_length=1, description="Text to synthesize into one voice note.")
+    voice_id: str = Field(
+        min_length=1,
+        description=(
+            "Voice id to synthesize with. ElevenLabs: provider voice id. OmniVoice: saved "
+            "OmniVoice preset or cloned/sample voice id from the local registry."
+        ),
+    )
+    speech_context: str = Field(
+        default="outreach_conversational",
+        description=(
+            "ElevenLabs: optional built-in delivery context; defaults to "
+            "`outreach_conversational`. OmniVoice: required saved speech-context id "
+            "carrying the voice design and generation settings, for example "
+            "`english_american` or `english_indian`."
+        ),
+    )
+
+    model_config = {
+        "extra": "allow",
+        "json_schema_extra": {
+            "example": {
+                "text": "Hey Priya, quick one. I noticed your team is hiring across outbound roles.",
+                "voice_id": "21m00Tcm4TlvDq8ikWAM",
+                "speech_context": "outreach_conversational",
+            }
+        },
+    }
+
+    def to_tts_request(self) -> TtsRequest:
+        """Convert the public body into the full internal TTS request.
+
+        Extra fields are intentionally accepted for frontend/backward
+        compatibility but omitted from Swagger.
+        """
+        advanced_fields = {"voice_name", "accent", "target_seconds", "wpm", "export_m4a"}
+        extras = {key: value for key, value in (self.model_extra or {}).items() if key in advanced_fields}
+        return TtsRequest(
+            text=self.text,
+            voice_id=self.voice_id,
+            speech_context=self.speech_context,
+            **extras,
+        )
 
 
 class WarningState(BaseModel):

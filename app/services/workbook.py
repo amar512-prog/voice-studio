@@ -55,7 +55,7 @@ class WorkbookService:
                         or "outreach_conversational",
                         target_seconds=int(values.get("target_seconds") or 55),
                         wpm=int(values.get("wpm") or 135),
-                        export_m4a=self._bool(values.get("export_m4a")),
+                        export_m4a=self._bool(values.get("export_m4a"), default=True),
                     )
                 )
             except Exception as exc:
@@ -108,9 +108,9 @@ class WorkbookService:
         text = str(value).strip()
         return text or None
 
-    def _bool(self, value) -> bool:
+    def _bool(self, value, *, default: bool = False) -> bool:
         if isinstance(value, bool):
             return value
         if value is None:
-            return False
+            return default
         return str(value).strip().lower() in {"1", "true", "yes", "y", "m4a"}

@@ -35,9 +35,11 @@ from app.models import (
     OmniVoiceTextRuleResponse,
     LogoutResponse,
     ProviderVoiceByIdRequest,
+    ProvidersResponse,
     ProviderVoiceOption,
     ProviderVoicePage,
     ProviderVoiceSaveRequest,
+    TtsApiRequest,
     TtsRequest,
     AuthState,
     VoiceCreateRequest,
@@ -64,7 +66,49 @@ settings = get_settings()
 # Providers are fully separated on disk under data/{provider}/. ElevenLabs is
 # the active UI/generation path today; OmniVoice is now registered/configurable
 # so Phase 2/3 can bind routes and UI without another storage migration.
+DEFAULT_PROVIDER = "omnivoice"
 PROVIDERS = ("elevenlabs", "omnivoice")
+ProviderPath = Annotated[
+    str,
+    ApiPath(
+        description="Provider id: `omnivoice` or `elevenlabs`.",
+        examples=["omnivoice", "elevenlabs"],
+    ),
+]
+ElevenLabsProviderPath = Annotated[
+    str,
+    ApiPath(
+        description="Provider id: `elevenlabs` only.",
+        examples=["elevenlabs"],
+    ),
+]
+OmniVoiceProviderPath = Annotated[
+    str,
+    ApiPath(
+        description="Provider id: `omnivoice` only.",
+        examples=["omnivoice"],
+    ),
+]
+CloneProviderPath = Annotated[
+    str,
+    ApiPath(
+        description=(
+            "Provider id: use `omnivoice` for local reference-audio cloning, "
+            "or `elevenlabs` for provider-hosted instant voice cloning."
+        ),
+        examples=["omnivoice", "elevenlabs"],
+    ),
+]
+PROVIDER_CATALOG = {
+    "omnivoice": {
+        "name": "OmniVoice",
+        "capabilities": ["tts", "batch", "clone", "presets", "text_rules"],
+    },
+    "elevenlabs": {
+        "name": "ElevenLabs",
+        "capabilities": ["tts", "batch", "clone", "voice_library"],
+    },
+}
 _storages = {provider: StorageService(settings, provider) for provider in PROVIDERS}
 for _provider_storage in _storages.values():
     _provider_storage.ensure()
@@ -95,7 +139,7 @@ duration_service = DurationService()
 audio_export_service = AudioExportService()
 workbooks = WorkbookService()
 PROVIDER_LIBRARY_ACCENTS = {"us", "in"}
-ACCENT_LABELS = {"us": "American", "in": "Indian", "neutral": "Neutral"}
+ACCENT_LABELS = {"us": "American", "in": "Indian", "neutral": "Neutral", "auto": "Auto"}
 LANGUAGE_LABELS = {"en": "English", "eng": "English", "english": "English"}
 # Maps the UI sort tabs to ElevenLabs shared-voices `sort` values.
 PROVIDER_SORT_MAP = {
@@ -171,7 +215,13 @@ _background_tasks: set[asyncio.Task] = set()
 
 def validate_provider(provider: str) -> str:
     if provider not in PROVIDERS:
-        raise HTTPException(status_code=404, detail=f"Unknown provider: {provider}")
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"Invalid argument `provider`: `{provider}`. "
+                f"Expected one of: {', '.join(PROVIDERS)}."
+            ),
+        )
     return provider
 
 
@@ -208,6 +258,7 @@ using provider-scoped ElevenLabs or OmniVoice generation, with single and batch
 """
 
 OPENAPI_TAGS = [
+    {"name": "System", "description": "Public service configuration and provider discovery."},
     {"name": "Voices", "description": "Saved voice registry and ElevenLabs voice picker."},
     {"name": "Generate", "description": "Single and batch text-to-speech generation."},
     {"name": "History", "description": "Generation jobs: list, inspect, and download."},
@@ -221,6 +272,22 @@ def _basic_health_payload() -> dict[str, object]:
         "auth_mode": settings.auth_mode,
         "providers": {provider: provider_configured(provider) for provider in PROVIDERS},
         "ffmpeg_available": duration_service.has_ffmpeg(),
+    }
+
+
+def _provider_catalog_payload() -> dict[str, object]:
+    ordered_providers = (DEFAULT_PROVIDER, *(provider for provider in PROVIDERS if provider != DEFAULT_PROVIDER))
+    return {
+        "default_provider": DEFAULT_PROVIDER,
+        "providers": [
+            {
+                "id": provider,
+                "name": PROVIDER_CATALOG[provider]["name"],
+                "configured": provider_configured(provider),
+                "capabilities": PROVIDER_CATALOG[provider]["capabilities"],
+            }
+            for provider in ordered_providers
+        ],
     }
 
 
@@ -304,7 +371,7 @@ class PasswordLogin(BaseModel):
     response_description="Provider and ffmpeg readiness.",
     include_in_schema=False,
 )
-def health(provider: str) -> HealthResponse:
+def health(provider: ProviderPath) -> HealthResponse:
     """Report whether the active provider is configured and ffmpeg is available."""
     provider = validate_provider(provider)
     return HealthResponse(
@@ -324,6 +391,18 @@ def health(provider: str) -> HealthResponse:
 def api_health() -> dict[str, object]:
     """Return a lightweight unauthenticated health payload for Docker/nginx checks."""
     return _basic_health_payload()
+
+
+@app.get(
+    "/api/providers",
+    response_model=ProvidersResponse,
+    tags=["System"],
+    summary="List supported providers",
+    response_description="Default provider plus configuration and capability metadata for every provider.",
+)
+def list_providers(_user: dict = Depends(current_user)) -> dict[str, object]:
+    """Return the provider catalog used for API and frontend discovery."""
+    return _provider_catalog_payload()
 
 
 @app.get(
@@ -478,7 +557,10 @@ def auth_logout(request: Request) -> dict[str, bool]:
     summary="List saved voices",
     response_description="All registry voices that pass the local eligibility filter.",
 )
-def list_voices(provider: str, _user: dict = Depends(current_user)) -> list[VoiceRecord]:
+def list_voices(
+    provider: ProviderPath,
+    _user: dict = Depends(current_user),
+) -> list[VoiceRecord]:
     """
     Return the local persistent voice registry.
 
@@ -496,8 +578,13 @@ def list_voices(provider: str, _user: dict = Depends(current_user)) -> list[Voic
     tags=["Voices"],
     summary="Add/update a voice by id",
     response_description="Saved or updated voice registry record.",
+    include_in_schema=False,
 )
-def add_voice(provider: str, request: VoiceCreateRequest, _user: dict = Depends(current_user)) -> VoiceRecord:
+def add_voice(
+    provider: ElevenLabsProviderPath,
+    request: VoiceCreateRequest,
+    _user: dict = Depends(current_user),
+) -> VoiceRecord:
     """
     Save a known ElevenLabs voice id into the local registry.
 
@@ -515,8 +602,9 @@ def add_voice(provider: str, request: VoiceCreateRequest, _user: dict = Depends(
     tags=["Voices"],
     summary="Clear the voice-library cache",
     response_description="Count of in-memory voice-library cache entries removed.",
+    include_in_schema=False,
 )
-def clear_provider_voice_cache(provider: str, _user: dict = Depends(current_user)) -> dict:
+def clear_provider_voice_cache(provider: ElevenLabsProviderPath, _user: dict = Depends(current_user)) -> dict:
     """
     Clear cached shared voice-library pages and cached shared voice records.
 
@@ -540,8 +628,16 @@ def clear_provider_voice_cache(provider: str, _user: dict = Depends(current_user
     response_description="The removed voice record.",
 )
 def delete_voice(
-    provider: str,
-    record_id: Annotated[str, ApiPath(description="Local VoiceRecord.id to remove.")],
+    provider: ProviderPath,
+    record_id: Annotated[
+        str,
+        ApiPath(
+            description=(
+                "Voice record `id` returned by `GET /api/{provider}/voices`. "
+                "Use the `id` field from that response, not the provider `voice_id`."
+            ),
+        ),
+    ],
     _user: dict = Depends(current_user),
 ) -> VoiceRecord:
     """
@@ -562,13 +658,14 @@ def delete_voice(
     tags=["Voices"],
     summary="Redirect to a voice preview clip",
     response_class=RedirectResponse,
+    include_in_schema=False,
     responses={
         307: {"description": "Redirect to provider-hosted preview audio."},
         404: {"description": "Voice not found or no preview is available."},
     },
 )
 async def voice_preview(
-    provider: str,
+    provider: ProviderPath,
     record_id: Annotated[str, ApiPath(description="Local VoiceRecord.id to preview.")],
     _user: dict = Depends(current_user),
 ) -> RedirectResponse:
@@ -754,9 +851,10 @@ async def _premade_voice_page(
     tags=["Voices"],
     summary="Browse ElevenLabs voices",
     response_description="One normalized page of provider voice options.",
+    include_in_schema=False,
 )
 async def list_provider_voice_options(
-    provider: str,
+    provider: ElevenLabsProviderPath,
     page: Annotated[int, Query(ge=0, description="Zero-based page index.")] = 0,
     page_size: Annotated[
         int,
@@ -863,9 +961,10 @@ def _map_accent(value: object) -> str | None:
     tags=["Voices"],
     summary="Add a voice by raw id",
     response_description="Saved registry record for the supplied provider id.",
+    include_in_schema=False,
 )
 async def add_provider_voice_by_id(
-    provider: str,
+    provider: ElevenLabsProviderPath,
     request: ProviderVoiceByIdRequest,
     _user: dict = Depends(current_user),
 ) -> VoiceRecord:
@@ -941,9 +1040,10 @@ async def add_provider_voice_by_id(
     tags=["Voices"],
     summary="Save a picked voice",
     response_description="Saved registry record for the selected provider voice.",
+    include_in_schema=False,
 )
 async def save_provider_voice_option(
-    provider: str,
+    provider: ElevenLabsProviderPath,
     voice_id: Annotated[str, ApiPath(description="Provider voice id selected from the voice picker.")],
     request: ProviderVoiceSaveRequest,
     _user: dict = Depends(current_user),
@@ -1030,7 +1130,7 @@ async def save_provider_voice_option(
     summary="Sync eligible workspace voices",
     response_description="Registry records created or updated from eligible workspace voices.",
 )
-async def sync_provider_voices(provider: str, _user: dict = Depends(current_user)) -> list[VoiceRecord]:
+async def sync_provider_voices(provider: ProviderPath, _user: dict = Depends(current_user)) -> list[VoiceRecord]:
     """
     Pull eligible voices from the ElevenLabs workspace into the local registry.
 
@@ -1155,7 +1255,10 @@ def _sync_omnivoice_presets(registry: VoiceRegistry) -> list[VoiceRecord]:
     summary="List OmniVoice speech contexts",
     response_description="Saved voice-design contexts (seeded with defaults).",
 )
-def list_omnivoice_contexts(provider: str, _user: dict = Depends(current_user)) -> list[OmniVoiceContext]:
+def list_omnivoice_contexts(
+    provider: OmniVoiceProviderPath,
+    _user: dict = Depends(current_user),
+) -> list[OmniVoiceContext]:
     _require_omnivoice(provider)
     return [OmniVoiceContext.model_validate(ctx) for ctx in _load_omnivoice_contexts()]
 
@@ -1168,11 +1271,14 @@ def list_omnivoice_contexts(provider: str, _user: dict = Depends(current_user)) 
     response_description="Blocking text-rule results plus deterministic spoken-text suggestions.",
 )
 def check_omnivoice_text_rules(
-    provider: str,
+    provider: OmniVoiceProviderPath,
     request: OmniVoiceTextRuleRequest,
     _user: dict = Depends(current_user),
 ) -> OmniVoiceTextRuleResponse:
-    """Check slash usage before OmniVoice generation without changing the submitted text."""
+    """Check following rules in the text:
+
+    - Replace slash `/` symbol because it is added as the word `slash` in the generated audio.
+    """
     _require_omnivoice(provider)
     result = check_omnivoice_text(request.text)
     return OmniVoiceTextRuleResponse(
@@ -1192,7 +1298,7 @@ def check_omnivoice_text_rules(
     response_description="The created or updated speech context.",
 )
 def upsert_omnivoice_context(
-    provider: str,
+    provider: OmniVoiceProviderPath,
     request: OmniVoiceContextRequest,
     _user: dict = Depends(current_user),
 ) -> OmniVoiceContext:
@@ -1225,8 +1331,16 @@ def upsert_omnivoice_context(
     response_description="The removed speech context.",
 )
 def delete_omnivoice_context(
-    provider: str,
-    context_id: Annotated[str, ApiPath(description="Speech-context id to remove.")],
+    provider: OmniVoiceProviderPath,
+    context_id: Annotated[
+        str,
+        ApiPath(
+            description=(
+                "Speech-context `id` returned by `GET /api/{provider}/speech-contexts`. "
+                "Use the `id` field from that response."
+            ),
+        ),
+    ],
     _user: dict = Depends(current_user),
 ) -> OmniVoiceContext:
     _require_omnivoice(provider)
@@ -1246,13 +1360,14 @@ def delete_omnivoice_context(
     tags=["Voices"],
     summary="Preview a speech context's voice design",
     response_description="Base64 WAV preview audio for the supplied design + settings.",
+    include_in_schema=False,
 )
 async def preview_omnivoice_context(
-    provider: str,
+    provider: OmniVoiceProviderPath,
     request: OmniVoiceContextPreviewRequest,
     _user: dict = Depends(current_user),
 ) -> OmniVoiceContextPreview:
-    """Design-only preview (no sample): synthesize from instruct + settings."""
+    """Design-only preview (uses model's preset voice based on text and instruct): synthesize from instruct + settings."""
     _require_omnivoice(provider)
     try:
         require_omnivoice_text_ready(request.text)
@@ -1281,12 +1396,22 @@ async def preview_omnivoice_context(
     response_model=VoiceRecord,
     tags=["Voices"],
     summary="Clone a voice from a sample",
-    response_description="Saved registry record for the cloned ElevenLabs voice.",
+    response_description="Saved registry record for the cloned OmniVoice or ElevenLabs voice.",
 )
 async def clone_voice(
-    provider: str,
+    provider: CloneProviderPath,
     name: Annotated[str, Form(min_length=1, description="Name for the cloned voice.")],
-    accent: Annotated[str, Form(description="Accent bucket to store with the cloned voice.")] = "neutral",
+    accent: Annotated[
+        str | None,
+        Form(
+            description=(
+                "Accent id. OmniVoice accepts `us` (American English), `in` (Indian English), "
+                "or `auto` (detect from the reference sample). ElevenLabs accepts `us`, `in`, "
+                "or `neutral` (unspecified)."
+            ),
+            examples=["us", "in", "auto"],
+        ),
+    ] = None,
     consent_confirmed: Annotated[
         bool,
         Form(description="Must be true. Confirms the user has permission to clone this voice."),
@@ -1303,15 +1428,33 @@ async def clone_voice(
     _user: dict = Depends(current_user),
 ) -> VoiceRecord:
     """
-    Clone a voice through ElevenLabs and persist it in the local registry.
+    Clone a voice through OmniVoice or ElevenLabs and persist it locally.
 
-    This endpoint requires explicit consent confirmation and an ElevenLabs plan
-    that supports instant voice cloning. The uploaded sample is stored under the
-    app data directory for auditability.
+    OmniVoice stores a normalized reference WAV locally. ElevenLabs uploads the
+    sample for instant voice cloning. Both paths require explicit consent, and
+    the uploaded sample is retained under the app data directory for auditability.
     """
     provider = validate_provider(provider)
+    accent_id = (accent or ("auto" if provider == "omnivoice" else "neutral")).strip().lower()
+    allowed_accents = {"us", "in", "auto"} if provider == "omnivoice" else {"us", "in", "neutral"}
+    if accent_id not in allowed_accents:
+        choices = (
+            "`us` (American English), `in` (Indian English), `auto` (detect from reference sample)"
+            if provider == "omnivoice"
+            else "`us` (American English), `in` (Indian English), `neutral` (unspecified)"
+        )
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Invalid argument `accent` for provider `{provider}`: `{accent_id}`. "
+                f"Expected one of: {choices}."
+            ),
+        )
     if not consent_confirmed:
-        raise HTTPException(status_code=400, detail="Consent confirmation is required before cloning.")
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid argument `consent_confirmed`: must be `true` before cloning.",
+        )
 
     provider_storage = storage_for(provider)
     registry = registry_for(provider)
@@ -1340,7 +1483,7 @@ async def clone_voice(
             "description": description,
             "voice_message_studio_profile": {
                 "language": "en",
-                "accent": accent,
+                "accent": accent_id,
                 "use_case": "conversational",
             },
         }
@@ -1351,7 +1494,7 @@ async def clone_voice(
             display_name=name,
             voice_id=voice_id,
             source_type="cloned",
-            accent=accent,
+            accent=accent_id,
             consent_status="confirmed",
             source_audio_path=provider_storage.relative_to_data(wav_path),
             provider_metadata=omnivoice_metadata,
@@ -1380,7 +1523,7 @@ async def clone_voice(
         display_name=name,
         voice_id=voice_id,
         source_type="cloned",
-        accent=accent,
+        accent=accent_id,
         consent_status="confirmed",
         source_audio_path=provider_storage.relative_to_data(source_path),
         provider_metadata=provider_voice,
@@ -1432,24 +1575,26 @@ def _save_job_manifest(
     summary="Generate one voice note",
     response_description="Single-row generation result with download URLs when completed.",
 )
-async def create_tts(provider: str, request: TtsRequest, _user: dict = Depends(current_user)) -> AudioResult:
+async def create_tts(provider: ProviderPath, request: TtsApiRequest, _user: dict = Depends(current_user)) -> AudioResult:
     """
     Generate one MP3 voice note and persist it as a job.
 
-    `target_seconds` is a soft warning threshold; generation is still allowed.
-    `max_seconds` is the hard LinkedIn-style limit used for red measured-duration
-    warnings. Set `export_m4a=true` to also write a mono AAC `.m4a` file.
+    ElevenLabs uses `voice_id` as the provider voice id and `speech_context` as
+    an optional built-in delivery style. OmniVoice uses `voice_id` as a saved
+    preset or cloned/sample voice and requires `speech_context` to be a saved
+    OmniVoice speech-context id with voice design and generation settings.
     """
     provider = validate_provider(provider)
+    tts_request = request.to_tts_request()
     if provider == "omnivoice":
         try:
-            require_omnivoice_text_ready(request.text)
+            require_omnivoice_text_ready(tts_request.text)
         except OmniVoiceTextRuleError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
     provider_storage = storage_for(provider)
     job_id = new_id("job")
     created_at = datetime.now(timezone.utc)
-    row = await generate_row(provider, job_id, 1, request)
+    row = await generate_row(provider, job_id, 1, tts_request)
     _save_job_manifest(provider_storage, job_id, "single", created_at, [row])
     return row
 
@@ -1625,7 +1770,7 @@ async def run_batch_job(provider: str, job_id: str, created_at: datetime, reques
     response_description="Accepted job. Poll GET /api/{provider}/jobs/{job_id} for status, progress, and results.",
 )
 async def create_batch(
-    provider: str,
+    provider: ProviderPath,
     file: UploadFile = File(
         ...,
         description=(
@@ -1714,7 +1859,7 @@ async def create_batch(
     summary="List generation jobs",
     response_description="Jobs sorted newest first.",
 )
-def list_jobs(provider: str, _user: dict = Depends(current_user)) -> list[JobSummary]:
+def list_jobs(provider: ProviderPath, _user: dict = Depends(current_user)) -> list[JobSummary]:
     """List persisted single and batch generation jobs from the data directory."""
     provider = validate_provider(provider)
     provider_storage = storage_for(provider)
@@ -1741,7 +1886,7 @@ def list_jobs(provider: str, _user: dict = Depends(current_user)) -> list[JobSum
     },
 )
 def download_job(
-    provider: str,
+    provider: ProviderPath,
     job_id: Annotated[str, ApiPath(description="Job id returned by /api/{provider}/tts or /api/{provider}/tts/batch.")],
     _user: dict = Depends(current_user),
 ) -> Response:
@@ -1804,7 +1949,7 @@ def download_job(
     response_description="Full job manifest with row-level results.",
 )
 def get_job(
-    provider: str,
+    provider: ProviderPath,
     job_id: Annotated[str, ApiPath(description="Job id returned by /api/{provider}/tts or /api/{provider}/tts/batch.")],
     _user: dict = Depends(current_user),
 ) -> JobDetail:
@@ -1828,15 +1973,26 @@ def get_job(
     },
 )
 def serve_data_file(
-    provider: str,
-    relative_path: Annotated[str, ApiPath(description="Path relative to DATA_DIR, as returned in result URLs.")],
+    provider: ProviderPath,
+    relative_path: Annotated[
+        str,
+        ApiPath(
+            description=(
+                "Append only the file path after `/files/`, not the full API URL. "
+                "Example: for `/api/omnivoice/files/jobs/job_xxx/row-001.mp3`, "
+                "enter `jobs/job_xxx/row-001.mp3`."
+            ),
+            examples=["jobs/job_xxx/row-001.mp3"],
+        ),
+    ],
     _user: dict = Depends(current_user),
 ) -> FileResponse:
     """
     Download a generated audio, transcript, workbook, source, or metadata file.
 
-    The path is resolved strictly under `DATA_DIR`; attempts to escape the data
-    directory are rejected.
+    Use only the path segment after `/files/`; the path is resolved strictly
+    under the selected provider's `DATA_DIR` subtree. Attempts to paste a full
+    API path or escape the data directory are rejected.
     """
     provider = validate_provider(provider)
     provider_storage = storage_for(provider)

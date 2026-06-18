@@ -6,6 +6,7 @@ import io
 import os
 import sys
 import tempfile
+import time
 import zipfile
 from pathlib import Path
 from typing import Any
@@ -142,6 +143,9 @@ class FakeDurationService:
 
 
 class FakeAudioExportService:
+    def export_wav(self, input_audio: Path, output_wav: Path) -> None:
+        output_wav.write_bytes(input_audio.read_bytes())
+
     def export_mp3(self, input_wav: Path, output_mp3: Path) -> None:
         output_mp3.write_bytes(b"fake-mp3-bytes")
 
@@ -170,23 +174,18 @@ def make_batch_workbook(
     voice_id: str = "premade_us_voice",
     speech_context: str = "outreach_conversational",
     text: str = "Batch test message.",
+    export_m4a: bool | None = None,
 ) -> bytes:
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "tts_requests"
-    sheet.append(["text", "voice_id", "voice_name", "accent", "speech_context", "target_seconds", "wpm", "export_m4a"])
-    sheet.append(
-        [
-            text,
-            voice_id,
-            "QA Voice",
-            "us",
-            speech_context,
-            55,
-            135,
-            True,
-        ]
-    )
+    headers = ["text", "voice_id", "voice_name", "accent", "speech_context", "target_seconds", "wpm"]
+    values = [text, voice_id, "QA Voice", "us", speech_context, 55, 135]
+    if export_m4a is not None:
+        headers.append("export_m4a")
+        values.append(export_m4a)
+    sheet.append(headers)
+    sheet.append(values)
     buffer = io.BytesIO()
     workbook.save(buffer)
     return buffer.getvalue()
@@ -225,8 +224,123 @@ def main() -> int:
             openapi_response = client.get("/openapi.json")
             assert_ok(openapi_response, 200, "GET /openapi.json")
             openapi = openapi_response.json()
+            assert "get" in openapi["paths"]["/api/{provider}/voices"]
+            assert "post" not in openapi["paths"]["/api/{provider}/voices"]
+            assert "/api/{provider}/voices/{record_id}/preview" not in openapi["paths"]
+            assert "/api/{provider}/voices/options" not in openapi["paths"]
+            assert "/api/{provider}/voices/by-id" not in openapi["paths"]
+            assert "/api/{provider}/voice-options/{voice_id}/save" not in openapi["paths"]
+            assert "/api/{provider}/voices/cache" not in openapi["paths"]
+            assert "/api/{provider}/speech-contexts/preview" not in openapi["paths"]
+            context_request_schema = openapi["components"]["schemas"]["OmniVoiceContextRequest"]["properties"]
+            tone_settings_schema = openapi["components"]["schemas"]["OmniVoiceToneSettings"]["properties"]
+            assert "male or female" in context_request_schema["instruct"]["description"]
+            assert "american accent or indian accent" in context_request_schema["instruct"]["description"]
+            assert "Leave empty for a clone-only context" in context_request_schema["instruct"]["description"]
+            assert "minLength" not in context_request_schema["instruct"]
+            assert "clone owner" in context_request_schema["name"]["description"]
+            assert tone_settings_schema["speed"]["minimum"] == 0.5
+            assert tone_settings_schema["speed"]["maximum"] == 1.5
+            assert tone_settings_schema["speed"]["multipleOf"] == 0.05
+            assert tone_settings_schema["num_step"]["minimum"] == 4
+            assert tone_settings_schema["num_step"]["maximum"] == 64
+            assert tone_settings_schema["guidance_scale"]["minimum"] == 0
+            assert tone_settings_schema["guidance_scale"]["maximum"] == 4
+            assert "reference audio" in tone_settings_schema["preprocess_prompt"]["description"]
+            assert "long silences" in tone_settings_schema["postprocess_output"]["description"]
+            clone_operation = openapi["paths"]["/api/{provider}/voices/clone"]["post"]
+            clone_provider_parameter = next(
+                parameter
+                for parameter in clone_operation["parameters"]
+                if parameter["name"] == "provider"
+            )
+            assert "local reference-audio cloning" in clone_provider_parameter["description"]
+            clone_body_ref = clone_operation["requestBody"]["content"]["multipart/form-data"]["schema"]["$ref"]
+            clone_body_schema = openapi["components"]["schemas"][clone_body_ref.rsplit("/", 1)[-1]]
+            assert "OmniVoice accepts `us`" in clone_body_schema["properties"]["accent"]["description"]
+            assert "`auto` (detect from the reference sample)" in clone_body_schema["properties"]["accent"]["description"]
+            assert "ElevenLabs accepts `us`" in clone_body_schema["properties"]["accent"]["description"]
+            text_rules_operation = openapi["paths"]["/api/{provider}/text-rules/check"]["post"]
+            assert "Check following rules in the text" in text_rules_operation["description"]
+            assert "Replace slash `/` symbol" in text_rules_operation["description"]
+            assert "word `slash`" in text_rules_operation["description"]
+            tts_operation = openapi["paths"]["/api/{provider}/tts"]["post"]
+            tts_description = " ".join(tts_operation["description"].split())
+            assert "OmniVoice uses `voice_id` as a saved" in tts_description
+            assert "requires `speech_context` to be a saved OmniVoice speech-context id" in tts_description
+            tts_body_ref = tts_operation["requestBody"]["content"]["application/json"]["schema"]["$ref"]
+            tts_schema = openapi["components"]["schemas"][tts_body_ref.rsplit("/", 1)[-1]]["properties"]
+            assert set(tts_schema) == {"text", "voice_id", "speech_context"}
+            assert "OmniVoice preset or cloned/sample voice id" in tts_schema["voice_id"]["description"]
+            assert "OmniVoice: required saved speech-context id" in tts_schema["speech_context"]["description"]
+            files_operation = openapi["paths"]["/api/{provider}/files/{relative_path}"]["get"]
+            files_description = " ".join(files_operation["description"].split())
+            assert "Use only the path segment after `/files/`" in files_description
+            relative_path_parameter = next(
+                parameter
+                for parameter in files_operation["parameters"]
+                if parameter["name"] == "relative_path"
+            )
+            assert "Append only the file path after `/files/`" in relative_path_parameter["description"]
+            assert "enter `jobs/job_xxx/row-001.mp3`" in relative_path_parameter["description"]
+            delete_voice_operation = openapi["paths"]["/api/{provider}/voices/{record_id}"]["delete"]
+            record_id_parameter = next(
+                parameter
+                for parameter in delete_voice_operation["parameters"]
+                if parameter["name"] == "record_id"
+            )
+            assert "returned by `GET /api/{provider}/voices`" in record_id_parameter["description"]
+            assert "Use the `id` field" in record_id_parameter["description"]
+            assert "not the provider `voice_id`" in record_id_parameter["description"]
+            delete_context_operation = openapi["paths"]["/api/{provider}/speech-contexts/{context_id}"]["delete"]
+            context_id_parameter = next(
+                parameter
+                for parameter in delete_context_operation["parameters"]
+                if parameter["name"] == "context_id"
+            )
+            assert "returned by `GET /api/{provider}/speech-contexts`" in context_id_parameter["description"]
+            assert "Use the `id` field" in context_id_parameter["description"]
+            providers_operation = openapi["paths"]["/api/providers"]["get"]
+            assert providers_operation["security"] == [{"APIKeyHeader": []}]
+            provider_operations = [
+                operation
+                for path, path_item in openapi["paths"].items()
+                if "{provider}" in path
+                for method, operation in path_item.items()
+                if method in HTTP_METHODS
+            ]
+            assert provider_operations
+            omnivoice_only_operations = {
+                "list_omnivoice_contexts_api__provider__speech_contexts_get",
+                "upsert_omnivoice_context_api__provider__speech_contexts_post",
+                "check_omnivoice_text_rules_api__provider__text_rules_check_post",
+                "delete_omnivoice_context_api__provider__speech_contexts__context_id__delete",
+            }
+            for operation in provider_operations:
+                provider_parameter = next(
+                    parameter
+                    for parameter in operation["parameters"]
+                    if parameter["name"] == "provider"
+                )
+                expected_description = (
+                    "Provider id: `omnivoice` only."
+                    if operation["operationId"] in omnivoice_only_operations
+                    else (
+                        "Provider id: use `omnivoice` for local reference-audio cloning, "
+                        "or `elevenlabs` for provider-hosted instant voice cloning."
+                        if operation["operationId"] == "clone_voice_api__provider__voices_clone_post"
+                        else "Provider id: `omnivoice` or `elevenlabs`."
+                    )
+                )
+            assert provider_parameter["description"] == expected_description
 
             call("GET", "/api/health", "/api/health")
+            call("GET", "/api/providers", "/api/providers", expected=401)
+            providers = call("GET", "/api/providers", "/api/providers", headers=api_headers).json()
+            assert providers["default_provider"] == "omnivoice"
+            assert [provider["id"] for provider in providers["providers"]] == ["omnivoice", "elevenlabs"]
+            assert "text_rules" in providers["providers"][0]["capabilities"]
+            assert "voice_library" in providers["providers"][1]["capabilities"]
             call("GET", "/api/config", "/api/config")
             call("GET", "/api/auth/me", "/api/auth/me")
 
@@ -367,12 +481,12 @@ def main() -> int:
                     "speech_context": "outreach_conversational",
                     "target_seconds": 55,
                     "wpm": 135,
-                    "export_m4a": True,
                 },
             ).json()
             assert tts_result["status"] == "completed"
+            assert tts_result["m4a_url"], "Expected default export_m4a=true to create an M4A URL"
 
-            call(
+            batch_job = call(
                 "POST",
                 "/api/{provider}/tts/batch",
                 "/api/elevenlabs/tts/batch",
@@ -385,7 +499,20 @@ def main() -> int:
                         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     )
                 },
-            )
+            ).json()
+            batch_detail = None
+            for _ in range(40):
+                batch_detail = call(
+                    "GET",
+                    "/api/{provider}/jobs/{job_id}",
+                    f"/api/elevenlabs/jobs/{batch_job['job_id']}",
+                    headers=api_headers,
+                ).json()
+                if batch_detail["status"] != "running":
+                    break
+                time.sleep(0.05)
+            assert batch_detail is not None and batch_detail["status"] != "running"
+            assert batch_detail["rows"][0]["m4a_url"], "Expected workbook default export_m4a=true to create M4A"
 
             jobs = call(
                 "GET",
@@ -451,11 +578,12 @@ def main() -> int:
                 headers=api_headers,
                 json={
                     "name": "QA Context",
-                    "instruct": "american accent",
+                    "instruct": "",
                     "language": "en",
                     "settings": {"speed": 1.0, "num_step": 8, "guidance_scale": 1.5},
                 },
             ).json()
+            assert custom_context["instruct"] == ""
             call(
                 "POST",
                 "/api/{provider}/speech-contexts/preview",
@@ -463,7 +591,7 @@ def main() -> int:
                 headers=api_headers,
                 json={
                     "text": "Preview this design.",
-                    "instruct": "american accent",
+                    "instruct": "",
                     "language": "en",
                     "settings": {"speed": 1.0, "num_step": 8, "guidance_scale": 1.5},
                 },
@@ -482,7 +610,7 @@ def main() -> int:
                 headers=api_headers,
                 data={
                     "name": "OmniVoice QA Clone",
-                    "accent": "us",
+                    "accent": "auto",
                     "consent_confirmed": "true",
                     "description": "Local QA clone",
                     "reference_text": "This is the reference transcript.",
@@ -490,6 +618,61 @@ def main() -> int:
                 files={"sample": ("sample.wav", b"sample-audio", "audio/wav")},
             ).json()
             assert cloned_omnivoice["provider_metadata"]["reference_text"] == "This is the reference transcript."
+            assert cloned_omnivoice["accent"] == "auto"
+
+            invalid_accent = call(
+                "POST",
+                "/api/{provider}/voices/clone",
+                "/api/omnivoice/voices/clone",
+                expected=400,
+                headers=api_headers,
+                data={
+                    "name": "Invalid Accent Clone",
+                    "accent": "neutral",
+                    "consent_confirmed": "true",
+                },
+                files={"sample": ("sample.wav", b"sample-audio", "audio/wav")},
+            )
+            assert invalid_accent.json()["detail"] == (
+                "Invalid argument `accent` for provider `omnivoice`: `neutral`. Expected one of: "
+                "`us` (American English), `in` (Indian English), `auto` (detect from reference sample)."
+            )
+
+            invalid_elevenlabs_accent = call(
+                "POST",
+                "/api/{provider}/voices/clone",
+                "/api/elevenlabs/voices/clone",
+                expected=400,
+                headers=api_headers,
+                data={
+                    "name": "Invalid ElevenLabs Accent",
+                    "accent": "auto",
+                    "consent_confirmed": "true",
+                },
+                files={"sample": ("sample.wav", b"sample-audio", "audio/wav")},
+            )
+            assert invalid_elevenlabs_accent.json()["detail"] == (
+                "Invalid argument `accent` for provider `elevenlabs`: `auto`. Expected one of: "
+                "`us` (American English), `in` (Indian English), `neutral` (unspecified)."
+            )
+
+            invalid_provider = call(
+                "POST",
+                "/api/{provider}/voices/clone",
+                "/api/not-a-provider/voices/clone",
+                expected=404,
+                headers=api_headers,
+                data={
+                    "name": "Invalid Provider Clone",
+                    "accent": "in",
+                    "consent_confirmed": "true",
+                },
+                files={"sample": ("sample.wav", b"sample-audio", "audio/wav")},
+            )
+            assert invalid_provider.json()["detail"] == (
+                "Invalid argument `provider`: `not-a-provider`. "
+                "Expected one of: elevenlabs, omnivoice."
+            )
 
             american_preset = next(
                 voice for voice in omnivoice_voices if voice["voice_id"] == "ov_design_english_american"
@@ -507,11 +690,11 @@ def main() -> int:
                     "speech_context": "english_american",
                     "target_seconds": 55,
                     "wpm": 135,
-                    "export_m4a": True,
                 },
             ).json()
             assert omnivoice_tts["status"] == "completed"
-            call(
+            assert omnivoice_tts["m4a_url"], "Expected default export_m4a=true to create an M4A URL"
+            omnivoice_batch_job = call(
                 "POST",
                 "/api/{provider}/tts/batch",
                 "/api/omnivoice/tts/batch",
@@ -528,6 +711,21 @@ def main() -> int:
                         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     )
                 },
+            ).json()
+            omnivoice_batch_detail = None
+            for _ in range(40):
+                omnivoice_batch_detail = call(
+                    "GET",
+                    "/api/{provider}/jobs/{job_id}",
+                    f"/api/omnivoice/jobs/{omnivoice_batch_job['job_id']}",
+                    headers=api_headers,
+                ).json()
+                if omnivoice_batch_detail["status"] != "running":
+                    break
+                time.sleep(0.05)
+            assert omnivoice_batch_detail is not None and omnivoice_batch_detail["status"] != "running"
+            assert omnivoice_batch_detail["rows"][0]["m4a_url"], (
+                "Expected workbook default export_m4a=true to create M4A"
             )
 
             visible_operations = {

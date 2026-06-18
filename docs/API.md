@@ -24,9 +24,32 @@ Health/config (not provider-scoped):
 
 | Method | Path | Notes |
 |---|---|---|
+| GET | `/api/providers` | Protected, Swagger-visible provider catalog. Returns the default provider, configuration state, and supported capabilities. |
 | GET | `/api/health` | Basic, unauthenticated. Reports each provider's `configured` flag + ffmpeg. Used by the Docker healthcheck. |
 | GET | `/api/{provider}/health` | Per-provider readiness. |
 | GET | `/api/config` | Public UI config (auth mode, defaults, accents). |
+
+Example:
+
+```json
+{
+  "default_provider": "omnivoice",
+  "providers": [
+    {
+      "id": "omnivoice",
+      "name": "OmniVoice",
+      "configured": true,
+      "capabilities": ["tts", "batch", "clone", "presets", "text_rules"]
+    },
+    {
+      "id": "elevenlabs",
+      "name": "ElevenLabs",
+      "configured": true,
+      "capabilities": ["tts", "batch", "clone", "voice_library"]
+    }
+  ]
+}
+```
 
 ---
 

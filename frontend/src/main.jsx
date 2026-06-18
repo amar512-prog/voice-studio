@@ -43,10 +43,17 @@ const DEFAULT_ACCENTS = [
   { id: "neutral", label: "Neutral" }
 ];
 
+const OMNIVOICE_ACCENTS = [
+  { id: "us", label: "American" },
+  { id: "in", label: "Indian" },
+  { id: "auto", label: "Auto" }
+];
+
 const ACCENT_LABELS = {
   us: "American",
   in: "Indian",
-  neutral: "Neutral"
+  neutral: "Neutral",
+  auto: "Auto"
 };
 
 const PROVIDER_ACCENT_OPTIONS = [
@@ -426,7 +433,7 @@ function App() {
   });
   const [cloneForm, setCloneForm] = useState({
     name: "",
-    accent: "neutral",
+    accent: initialRoute.provider === "omnivoice" ? "auto" : "neutral",
     description: "",
     reference_text: "",
     consent_confirmed: false,
@@ -536,6 +543,10 @@ function App() {
       voice_name: "",
       accent: "us",
       speech_context: activeProvider === "omnivoice" ? "english_american" : "outreach_conversational"
+    }));
+    setCloneForm((current) => ({
+      ...current,
+      accent: activeProvider === "omnivoice" ? "auto" : "neutral"
     }));
   }, [activeProvider]);
 
@@ -936,7 +947,7 @@ function App() {
       }));
       setCloneForm({
         name: "",
-        accent: "neutral",
+        accent: activeProvider === "omnivoice" ? "auto" : "neutral",
         description: "",
         reference_text: "",
         consent_confirmed: false,
@@ -1178,7 +1189,7 @@ function App() {
             setCloneForm={setCloneForm}
             cloneVoice={cloneVoice}
             busy={busy}
-            accents={config.accents}
+            accents={activeProvider === "omnivoice" ? OMNIVOICE_ACCENTS : config.accents}
           />
         )}
 
@@ -1382,7 +1393,7 @@ function GeneratePage({
 
         <div className="control-row">
           <SegmentedAccent
-            accents={config.accents}
+            accents={activeProvider === "omnivoice" ? OMNIVOICE_ACCENTS : config.accents}
             value={ttsForm.accent}
             onChange={changeTtsAccent}
           />
