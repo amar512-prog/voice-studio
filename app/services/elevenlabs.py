@@ -7,7 +7,6 @@ from typing import Any
 import httpx
 
 from app.config import Settings
-from app.models import SpeechContext
 from app.services.speech_context import DELIVERY_TAGS_BY_CONTEXT, VOICE_SETTINGS_BY_CONTEXT
 
 
@@ -24,14 +23,17 @@ class ElevenLabsClient:
             raise ElevenLabsError("ELEVENLABS_API_KEY is not configured.")
         return self.settings.elevenlabs_api_key
 
-    async def text_to_speech(self, voice_id: str, text: str, speech_context: SpeechContext) -> bytes:
+    async def text_to_speech(self, voice_id: str, text: str, speech_context: str) -> bytes:
         api_key = self._require_key()
         url = f"{self.settings.elevenlabs_base_url}/text-to-speech/{voice_id}"
+        voice_settings = VOICE_SETTINGS_BY_CONTEXT.get(
+            speech_context, VOICE_SETTINGS_BY_CONTEXT["outreach_conversational"]
+        )
         payload = {
             "text": self._prepare_text(text, speech_context),
             "model_id": self.settings.elevenlabs_model_id,
             "language_code": self.settings.elevenlabs_language_code,
-            "voice_settings": VOICE_SETTINGS_BY_CONTEXT[speech_context],
+            "voice_settings": voice_settings,
         }
         headers = {
             "xi-api-key": api_key,
@@ -78,11 +80,12 @@ class ElevenLabsClient:
                     pass
         return min(1.5 * (2**attempt), 30.0)
 
-    def _prepare_text(self, text: str, speech_context: SpeechContext) -> str:
+    def _prepare_text(self, text: str, speech_context: str) -> str:
         clean_text = text.strip()
         if self.settings.elevenlabs_model_id != "eleven_v3" or clean_text.startswith("["):
             return clean_text
-        return f"{DELIVERY_TAGS_BY_CONTEXT[speech_context]} {clean_text}"
+        tag = DELIVERY_TAGS_BY_CONTEXT.get(speech_context, DELIVERY_TAGS_BY_CONTEXT["outreach_conversational"])
+        return f"{tag} {clean_text}"
 
     async def list_voices(self) -> list[dict[str, Any]]:
         api_key = self._require_key()

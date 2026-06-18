@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 import io
@@ -26,6 +27,10 @@ from app.models import (
     JobDetail,
     JobStatus,
     JobSummary,
+    OmniVoiceContext,
+    OmniVoiceContextPreview,
+    OmniVoiceContextPreviewRequest,
+    OmniVoiceContextRequest,
     LogoutResponse,
     ProviderVoiceByIdRequest,
     ProviderVoiceOption,
@@ -40,6 +45,7 @@ from app.models import (
 from app.services.audio_export import AudioExportService
 from app.services.duration import DurationService
 from app.services.elevenlabs import ElevenLabsClient, ElevenLabsError
+from app.services.omnivoice import OmniVoiceClient, OmniVoiceError
 from app.services.speech_context import CONTEXT_LABELS, CONTEXT_NOTES
 from app.services.storage import StorageService, new_id, now_utc, safe_filename
 from app.services.voice_filter import ProviderVoiceProfile, provider_voice_profile, provider_voice_rank
@@ -48,14 +54,18 @@ from app.services.workbook import WorkbookError, WorkbookService
 
 settings = get_settings()
 
-# Providers are fully separated on disk under data/{provider}/. Phase 1 wires only
-# ElevenLabs; adding a provider later means registering its client/storage here.
-PROVIDERS = ("elevenlabs",)
+# Providers are fully separated on disk under data/{provider}/. ElevenLabs is
+# the active UI/generation path today; OmniVoice is now registered/configurable
+# so Phase 2/3 can bind routes and UI without another storage migration.
+PROVIDERS = ("elevenlabs", "omnivoice")
 _storages = {provider: StorageService(settings, provider) for provider in PROVIDERS}
 for _provider_storage in _storages.values():
     _provider_storage.ensure()
 _registries = {provider: VoiceRegistry(_storages[provider]) for provider in PROVIDERS}
-_clients = {provider: ElevenLabsClient(settings) for provider in PROVIDERS}
+_clients = {
+    "elevenlabs": ElevenLabsClient(settings),
+    "omnivoice": OmniVoiceClient(settings),
+}
 
 
 def storage_for(provider: str) -> StorageService:
@@ -66,7 +76,7 @@ def registry_for(provider: str) -> VoiceRegistry:
     return _registries[provider]
 
 
-def client_for(provider: str) -> ElevenLabsClient:
+def client_for(provider: str) -> ElevenLabsClient | OmniVoiceClient:
     return _clients[provider]
 
 
@@ -91,10 +101,45 @@ PROVIDER_SORT_MAP = {
 PROVIDER_ACCENT_PARAM = {"us": "american", "in": "indian"}
 PROVIDER_PAGE_SIZE_DEFAULT = 20
 PROVIDER_PAGE_SIZE_MAX = 100
-# In-memory caches so paging/sorting the voice library does not re-hit ElevenLabs.
-# Cleared manually via DELETE /api/elevenlabs/voices/cache.
+# In-memory caches so paging/sorting the ElevenLabs voice library does not re-hit
+# the provider. Cleared manually via DELETE /api/{provider}/voices/cache.
 _shared_page_cache: dict[str, dict] = {}
 _shared_voice_cache: dict[str, dict] = {}
+
+# Default OmniVoice speech contexts seeded on first use. "outreach" mirrors the
+# OmniVoice Demo PDF. Users add/modify contexts from the Generate voice editor.
+OMNIVOICE_DEFAULT_CONTEXTS = [
+    {
+        "id": "outreach",
+        "name": "Outreach",
+        "instruct": "male, american accent, middle-aged, very high pitch",
+        "language": None,
+        "settings": {
+            "speed": 1.1,
+            "duration": None,
+            "num_step": 64,
+            "guidance_scale": 4.0,
+            "denoise": True,
+            "preprocess_prompt": True,
+            "postprocess_output": True,
+        },
+    },
+    {
+        "id": "conversational",
+        "name": "Conversational",
+        "instruct": "neutral, conversational, american accent",
+        "language": None,
+        "settings": {
+            "speed": 1.0,
+            "duration": None,
+            "num_step": 32,
+            "guidance_scale": 2.0,
+            "denoise": True,
+            "preprocess_prompt": True,
+            "postprocess_output": True,
+        },
+    },
+]
 
 logger = logging.getLogger("voice_message_studio")
 # Bounds concurrent TTS+ffmpeg work so parallel requests/batches can't spawn an
@@ -103,21 +148,36 @@ _generation_semaphore = asyncio.Semaphore(settings.max_concurrent_generations)
 # Strong refs to in-flight background batch tasks so they are not garbage-collected.
 _background_tasks: set[asyncio.Task] = set()
 
+
+def validate_provider(provider: str) -> str:
+    if provider not in PROVIDERS:
+        raise HTTPException(status_code=404, detail=f"Unknown provider: {provider}")
+    return provider
+
+
+def provider_configured(provider: str) -> bool:
+    provider = validate_provider(provider)
+    if provider == "elevenlabs":
+        return bool(settings.elevenlabs_api_key)
+    if provider == "omnivoice":
+        return bool(settings.omnivoice_base_url)
+    return False
+
 API_DESCRIPTION = """
 **Voice Message Studio** turns text into reviewable LinkedIn-ready voice notes
-using ElevenLabs, with single and batch (Excel) generation, a voice registry,
-and a job history with per-job ZIP export.
+using provider-scoped ElevenLabs or OmniVoice generation, with single and batch
+(Excel) generation, a voice registry, and a job history with per-job ZIP export.
 
 ### Workflow
 
-1. **Pick a voice** — browse premade/library voices (`GET /api/elevenlabs/voices`)
-   and save one (`POST /api/elevenlabs/voices/{voice_id}`), or list your saved
-   voices (`GET /api/voices`).
-2. **Generate** — one clip (`POST /api/tts`) or a batch from an `.xlsx`
-   (`POST /api/tts/batch`). Each run becomes a **job**.
-3. **History** — list jobs (`GET /api/jobs`), inspect rows
-   (`GET /api/jobs/{job_id}`), and download a ZIP of text + mp3 + m4a
-   (`GET /api/jobs/{job_id}/download`).
+1. **Pick a provider + voice** — use provider-scoped routes such as
+   `GET /api/{provider}/voices`, `POST /api/{provider}/voices/sync`, and
+   `GET /api/{provider}/voices/options` (ElevenLabs only).
+2. **Generate** — one clip (`POST /api/{provider}/tts`) or a batch from an
+   `.xlsx` (`POST /api/{provider}/tts/batch`). Each run becomes a **job**.
+3. **History** — list jobs (`GET /api/{provider}/jobs`), inspect rows
+   (`GET /api/{provider}/jobs/{job_id}`), and download a ZIP from
+   `GET /api/{provider}/jobs/{job_id}/download`.
 
 ### Authentication
 
@@ -134,15 +194,25 @@ OPENAPI_TAGS = [
     {"name": "Files", "description": "Authenticated file downloads from DATA_DIR."},
 ]
 
-def _reconcile_interrupted_jobs() -> None:
+
+def _basic_health_payload() -> dict[str, object]:
+    return {
+        "status": "ok",
+        "auth_mode": settings.auth_mode,
+        "providers": {provider: provider_configured(provider) for provider in PROVIDERS},
+        "ffmpeg_available": duration_service.has_ffmpeg(),
+    }
+
+
+def _reconcile_interrupted_jobs(storage_service: StorageService) -> None:
     """Mark jobs left 'running' by a previous process as interrupted.
 
     Safe because this single-worker process starts with zero in-flight tasks, so
     any persisted 'running' job cannot still be alive. NOTE: this assumption breaks
     with multiple workers/processes — switch to heartbeat-based reaping if you scale.
     """
-    for job_id in storage.list_job_ids():
-        manifest = storage.read_job_manifest(job_id)
+    for job_id in storage_service.list_job_ids():
+        manifest = storage_service.read_job_manifest(job_id)
         if not manifest or manifest.get("status") != "running":
             continue
         manifest["status"] = "interrupted"
@@ -150,14 +220,18 @@ def _reconcile_interrupted_jobs() -> None:
         completed = manifest.get("completed_rows", 0)
         total = manifest.get("total_rows", 0)
         manifest["failed_rows"] = max(manifest.get("failed_rows", 0), total - completed)
-        storage.save_job_manifest(job_id, manifest)
-        logger.warning("Marked interrupted job %s on startup", job_id)
+        storage_service.save_job_manifest(job_id, manifest)
+        logger.warning("Marked interrupted job %s for provider %s on startup", job_id, storage_service.provider)
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    storage.ensure()
-    _reconcile_interrupted_jobs()
+    for storage_service in _storages.values():
+        storage_service.ensure()
+        _reconcile_interrupted_jobs(storage_service)
+    # Seed OmniVoice speech contexts once at startup (avoids a first-request race).
+    if "omnivoice" in PROVIDERS:
+        _load_omnivoice_contexts()
     yield
 
 
@@ -198,20 +272,33 @@ class PasswordLogin(BaseModel):
 
 
 @app.get(
-    "/api/health",
+    "/api/{provider}/health",
     response_model=HealthResponse,
     tags=["System"],
     summary="Service health",
     response_description="Provider and ffmpeg readiness.",
     include_in_schema=False,
 )
-def health() -> HealthResponse:
-    """Report whether the ElevenLabs key is configured and ffmpeg is available."""
+def health(provider: str) -> HealthResponse:
+    """Report whether the active provider is configured and ffmpeg is available."""
+    provider = validate_provider(provider)
     return HealthResponse(
         status="ok",
-        provider_configured=bool(settings.elevenlabs_api_key),
+        provider_configured=provider_configured(provider),
         ffmpeg_available=duration_service.has_ffmpeg(),
     )
+
+
+@app.get(
+    "/api/health",
+    tags=["System"],
+    summary="Basic app health",
+    response_description="Simple container-safe health check.",
+    include_in_schema=False,
+)
+def api_health() -> dict[str, object]:
+    """Return a lightweight unauthenticated health payload for Docker/nginx checks."""
+    return _basic_health_payload()
 
 
 @app.get(
@@ -360,13 +447,13 @@ def auth_logout(request: Request) -> dict[str, bool]:
 
 
 @app.get(
-    "/api/voices",
+    "/api/{provider}/voices",
     response_model=list[VoiceRecord],
     tags=["Voices"],
     summary="List saved voices",
     response_description="All registry voices that pass the local eligibility filter.",
 )
-def list_voices(_user: dict = Depends(current_user)) -> list[VoiceRecord]:
+def list_voices(provider: str, _user: dict = Depends(current_user)) -> list[VoiceRecord]:
     """
     Return the local persistent voice registry.
 
@@ -374,17 +461,18 @@ def list_voices(_user: dict = Depends(current_user)) -> list[VoiceRecord]:
     are filtered to the supported English conversational accent buckets; manual
     and cloned voices are returned as long as their stored accent is supported.
     """
-    return voice_registry.list()
+    provider = validate_provider(provider)
+    return registry_for(provider).list()
 
 
 @app.post(
-    "/api/voices",
+    "/api/{provider}/voices",
     response_model=VoiceRecord,
     tags=["Voices"],
     summary="Add/update a voice by id",
     response_description="Saved or updated voice registry record.",
 )
-def add_voice(request: VoiceCreateRequest, _user: dict = Depends(current_user)) -> VoiceRecord:
+def add_voice(provider: str, request: VoiceCreateRequest, _user: dict = Depends(current_user)) -> VoiceRecord:
     """
     Save a known ElevenLabs voice id into the local registry.
 
@@ -392,17 +480,19 @@ def add_voice(request: VoiceCreateRequest, _user: dict = Depends(current_user)) 
     endpoint does not validate that the provider id can synthesize audio; use it
     when you already know the id is valid or want to test a provider id directly.
     """
-    return voice_registry.upsert(request)
+    provider = validate_provider(provider)
+    return registry_for(provider).upsert(request)
 
 
 @app.delete(
-    "/api/voices/{record_id}",
+    "/api/{provider}/voices/{record_id}",
     response_model=VoiceRecord,
     tags=["Voices"],
     summary="Delete a saved voice",
     response_description="The removed voice record.",
 )
 def delete_voice(
+    provider: str,
     record_id: Annotated[str, ApiPath(description="Local VoiceRecord.id to remove.")],
     _user: dict = Depends(current_user),
 ) -> VoiceRecord:
@@ -412,14 +502,15 @@ def delete_voice(
     This only removes the app's saved reference. It does not delete the voice
     from ElevenLabs or remove generated files that used this voice.
     """
-    removed = voice_registry.delete(record_id)
+    provider = validate_provider(provider)
+    removed = registry_for(provider).delete(record_id)
     if removed is None:
         raise HTTPException(status_code=404, detail="Voice record not found.")
     return removed
 
 
 @app.get(
-    "/api/voices/{record_id}/preview",
+    "/api/{provider}/voices/{record_id}/preview",
     tags=["Voices"],
     summary="Redirect to a voice preview clip",
     response_class=RedirectResponse,
@@ -429,6 +520,7 @@ def delete_voice(
     },
 )
 async def voice_preview(
+    provider: str,
     record_id: Annotated[str, ApiPath(description="Local VoiceRecord.id to preview.")],
     _user: dict = Depends(current_user),
 ) -> RedirectResponse:
@@ -438,13 +530,15 @@ async def voice_preview(
     The endpoint first checks cached provider metadata. If no preview is stored,
     it makes a best-effort ElevenLabs lookup by `voice_id`.
     """
-    record = next((item for item in voice_registry.list() if item.id == record_id), None)
+    provider = validate_provider(provider)
+    registry = registry_for(provider)
+    record = next((item for item in registry.list() if item.id == record_id), None)
     if record is None:
         raise HTTPException(status_code=404, detail="Voice record not found.")
 
     metadata = record.provider_metadata or {}
     preview_url = metadata.get("preview_url") or (metadata.get("labels") or {}).get("preview_url")
-    if not preview_url:
+    if not preview_url and provider == "elevenlabs":
         try:
             fetched = await elevenlabs.get_voice(record.voice_id)
             preview_url = fetched.get("preview_url")
@@ -472,12 +566,12 @@ async def _eligible_provider_voices() -> list[tuple[tuple[int, str], dict, Provi
     return eligible_voices
 
 
-def _save_provider_voice(voice: dict, profile: ProviderVoiceProfile) -> VoiceRecord:
+def _save_provider_voice(registry: VoiceRegistry, voice: dict, profile: ProviderVoiceProfile) -> VoiceRecord:
     voice_id = voice.get("voice_id") or voice.get("id")
     name = voice.get("name") or voice_id
     if not voice_id:
         raise HTTPException(status_code=502, detail="ElevenLabs voice did not include a voice_id.")
-    return voice_registry.upsert(
+    return registry.upsert(
         VoiceCreateRequest(
             display_name=name,
             voice_id=voice_id,
@@ -496,10 +590,10 @@ def _save_provider_voice(voice: dict, profile: ProviderVoiceProfile) -> VoiceRec
     )
 
 
-def _saved_shared_ids() -> set[str]:
+def _saved_shared_ids(registry: VoiceRegistry) -> set[str]:
     """Workspace voice ids plus the original shared voice ids they were added from."""
     saved: set[str] = set()
-    for record in voice_registry.list():
+    for record in registry.list():
         saved.add(record.voice_id)
         shared_id = (record.provider_metadata or {}).get("shared_voice_id")
         if shared_id:
@@ -571,14 +665,14 @@ def _sort_premade_options(options: list[ProviderVoiceOption], sort_id: str) -> N
 
 
 async def _premade_voice_page(
-    accent_id: str, sort_id: str, page: int, page_size: int
+    registry: VoiceRegistry, accent_id: str, sort_id: str, page: int, page_size: int
 ) -> ProviderVoicePage:
     try:
         workspace = await elevenlabs.list_voices()
     except ElevenLabsError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    saved_ids = _saved_shared_ids()
+    saved_ids = _saved_shared_ids(registry)
     options: list[ProviderVoiceOption] = []
     for voice in workspace:
         if voice.get("category") != "premade":
@@ -607,13 +701,14 @@ async def _premade_voice_page(
 
 
 @app.get(
-    "/api/elevenlabs/voices",
+    "/api/{provider}/voices/options",
     response_model=ProviderVoicePage,
     tags=["Voices"],
     summary="Browse ElevenLabs voices",
     response_description="One normalized page of provider voice options.",
 )
 async def list_provider_voice_options(
+    provider: str,
     page: Annotated[int, Query(ge=0, description="Zero-based page index.")] = 0,
     page_size: Annotated[
         int,
@@ -653,13 +748,17 @@ async def list_provider_voice_options(
     shared voice library using the same English/conversational/American-or-Indian
     filters and the requested sort tab.
     """
+    provider = validate_provider(provider)
+    if provider != "elevenlabs":
+        raise HTTPException(status_code=404, detail="Voice-library browsing is available only for ElevenLabs.")
     page = max(page, 0)
     page_size = max(1, min(page_size, PROVIDER_PAGE_SIZE_MAX))
     accent_id = accent if accent in PROVIDER_ACCENT_PARAM else "us"
     sort_id = sort if sort in PROVIDER_SORT_MAP else "trending"
+    registry = registry_for(provider)
 
     if premade_only:
-        return await _premade_voice_page(accent_id, sort_id, page, page_size)
+        return await _premade_voice_page(registry, accent_id, sort_id, page, page_size)
 
     cache_key = f"{accent_id}:{sort_id}:{page}:{page_size}"
     data = _shared_page_cache.get(cache_key)
@@ -681,7 +780,7 @@ async def list_provider_voice_options(
             if voice_id:
                 _shared_voice_cache[voice_id] = voice
 
-    saved_ids = _saved_shared_ids()
+    saved_ids = _saved_shared_ids(registry)
     options: list[ProviderVoiceOption] = []
     for voice in data.get("voices", []):
         option = _shared_voice_option(voice, accent_id, saved_ids)
@@ -700,19 +799,22 @@ async def list_provider_voice_options(
 
 
 @app.delete(
-    "/api/elevenlabs/voices/cache",
+    "/api/{provider}/voices/cache",
     response_model=CacheClearResponse,
     tags=["Voices"],
     summary="Clear the voice-library cache",
     response_description="Count of in-memory voice-library cache entries removed.",
 )
-def clear_provider_voice_cache(_user: dict = Depends(current_user)) -> dict:
+def clear_provider_voice_cache(provider: str, _user: dict = Depends(current_user)) -> dict:
     """
     Clear cached shared voice-library pages and cached shared voice records.
 
     Use this when ElevenLabs library results look stale, after changing filters,
     or while debugging provider picker behavior.
     """
+    provider = validate_provider(provider)
+    if provider != "elevenlabs":
+        raise HTTPException(status_code=404, detail="Voice-library caching is available only for ElevenLabs.")
     cleared = len(_shared_page_cache) + len(_shared_voice_cache)
     _shared_page_cache.clear()
     _shared_voice_cache.clear()
@@ -731,13 +833,14 @@ def _map_accent(value: object) -> str | None:
 
 
 @app.post(
-    "/api/elevenlabs/voices/by-id",
+    "/api/{provider}/voices/by-id",
     response_model=VoiceRecord,
     tags=["Voices"],
     summary="Add a voice by raw id",
     response_description="Saved registry record for the supplied provider id.",
 )
 async def add_provider_voice_by_id(
+    provider: str,
     request: ProviderVoiceByIdRequest,
     _user: dict = Depends(current_user),
 ) -> VoiceRecord:
@@ -748,6 +851,10 @@ async def add_provider_voice_by_id(
     and accent. If ElevenLabs does not expose that metadata, the id is still
     saved as a manual voice so it can be used for TTS.
     """
+    provider = validate_provider(provider)
+    if provider != "elevenlabs":
+        raise HTTPException(status_code=404, detail="Raw voice-id registration is available only for ElevenLabs.")
+    registry = registry_for(provider)
     voice_id = request.voice_id.strip()
     if not voice_id:
         raise HTTPException(status_code=400, detail="A voice id is required.")
@@ -755,7 +862,7 @@ async def add_provider_voice_by_id(
     existing = next(
         (
             record
-            for record in voice_registry.list()
+            for record in registry.list()
             if record.voice_id == voice_id
             or (record.provider_metadata or {}).get("shared_voice_id") == voice_id
         ),
@@ -788,7 +895,7 @@ async def add_provider_voice_by_id(
             labels = fetched.get("labels") or {}
             accent_id = _map_accent(labels.get("accent")) or accent_id
 
-    return voice_registry.upsert(
+    return registry.upsert(
         VoiceCreateRequest(
             display_name=name or voice_id,
             voice_id=voice_id,
@@ -804,13 +911,14 @@ async def add_provider_voice_by_id(
 
 
 @app.post(
-    "/api/elevenlabs/voices/{voice_id}",
+    "/api/{provider}/voice-options/{voice_id}/save",
     response_model=VoiceRecord,
     tags=["Voices"],
     summary="Save a picked voice",
     response_description="Saved registry record for the selected provider voice.",
 )
 async def save_provider_voice_option(
+    provider: str,
     voice_id: Annotated[str, ApiPath(description="Provider voice id selected from the voice picker.")],
     request: ProviderVoiceSaveRequest,
     _user: dict = Depends(current_user),
@@ -822,11 +930,15 @@ async def save_provider_voice_option(
     `public_owner_id`; those are first copied into the ElevenLabs workspace,
     then the newly returned workspace voice id is saved locally.
     """
+    provider = validate_provider(provider)
+    if provider != "elevenlabs":
+        raise HTTPException(status_code=404, detail="Voice-library save is available only for ElevenLabs.")
+    registry = registry_for(provider)
     accent_id = request.accent if request.accent in PROVIDER_LIBRARY_ACCENTS else "neutral"
     existing = next(
         (
             record
-            for record in voice_registry.list()
+            for record in registry.list()
             if record.voice_id == voice_id
             or (record.provider_metadata or {}).get("shared_voice_id") == voice_id
         ),
@@ -839,7 +951,7 @@ async def save_provider_voice_option(
     # register them as-is. Shared library voices must first be copied into the
     # workspace via the owner id, which yields a new usable voice id.
     if not request.public_owner_id:
-        return voice_registry.upsert(
+        return registry.upsert(
             VoiceCreateRequest(
                 display_name=request.name,
                 voice_id=voice_id,
@@ -863,7 +975,7 @@ async def save_provider_voice_option(
     if not new_voice_id:
         raise HTTPException(status_code=502, detail="ElevenLabs did not return a voice_id.")
 
-    return voice_registry.upsert(
+    return registry.upsert(
         VoiceCreateRequest(
             display_name=request.name,
             voice_id=new_voice_id,
@@ -887,24 +999,30 @@ async def save_provider_voice_option(
 
 
 @app.post(
-    "/api/voices/sync",
+    "/api/{provider}/voices/sync",
     response_model=list[VoiceRecord],
     tags=["Voices"],
     summary="Sync eligible workspace voices",
     response_description="Registry records created or updated from eligible workspace voices.",
 )
-async def sync_provider_voices(_user: dict = Depends(current_user)) -> list[VoiceRecord]:
+async def sync_provider_voices(provider: str, _user: dict = Depends(current_user)) -> list[VoiceRecord]:
     """
     Pull eligible voices from the ElevenLabs workspace into the local registry.
 
     Eligibility is intentionally narrow: English, conversational, and currently
     American or Indian accent only. Existing records are updated by `voice_id`.
     """
+    provider = validate_provider(provider)
+    registry = registry_for(provider)
+    if provider == "omnivoice":
+        # OmniVoice voices are uploaded sample clones only; nothing to sync.
+        return registry.list()
+
     synced: list[VoiceRecord] = []
     for _rank, voice, profile in await _eligible_provider_voices():
         if profile.accent not in PROVIDER_LIBRARY_ACCENTS:
             continue
-        synced.append(_save_provider_voice(voice, profile))
+        synced.append(_save_provider_voice(registry, voice, profile))
     return synced
 
 
@@ -927,14 +1045,142 @@ def _title_label(value: str) -> str:
     return value.replace("_", " ").replace("-", " ").title()
 
 
+# ---- OmniVoice speech contexts (persisted, editable voice-design + settings) ----
+
+
+def _require_omnivoice(provider: str) -> str:
+    provider = validate_provider(provider)
+    if provider != "omnivoice":
+        raise HTTPException(status_code=404, detail="Speech contexts are available only for OmniVoice.")
+    return provider
+
+
+def _load_omnivoice_contexts() -> list[dict]:
+    """Read persisted OmniVoice contexts, seeding defaults the first time."""
+    store = storage_for("omnivoice")
+    contexts = store.read_json(store.speech_contexts_path, None)
+    if not isinstance(contexts, list) or not contexts:
+        contexts = [dict(ctx) for ctx in OMNIVOICE_DEFAULT_CONTEXTS]
+        store.write_json(store.speech_contexts_path, contexts)
+    return contexts
+
+
+def _save_omnivoice_contexts(contexts: list[dict]) -> None:
+    store = storage_for("omnivoice")
+    store.write_json(store.speech_contexts_path, contexts)
+
+
+def _get_omnivoice_context(context_id: str) -> dict | None:
+    return next((ctx for ctx in _load_omnivoice_contexts() if ctx.get("id") == context_id), None)
+
+
+@app.get(
+    "/api/{provider}/speech-contexts",
+    response_model=list[OmniVoiceContext],
+    tags=["Voices"],
+    summary="List OmniVoice speech contexts",
+    response_description="Saved voice-design contexts (seeded with defaults).",
+)
+def list_omnivoice_contexts(provider: str, _user: dict = Depends(current_user)) -> list[OmniVoiceContext]:
+    _require_omnivoice(provider)
+    return [OmniVoiceContext.model_validate(ctx) for ctx in _load_omnivoice_contexts()]
+
+
 @app.post(
-    "/api/voices/clone",
+    "/api/{provider}/speech-contexts",
+    response_model=OmniVoiceContext,
+    tags=["Voices"],
+    summary="Add or modify an OmniVoice speech context",
+    response_description="The created or updated speech context.",
+)
+def upsert_omnivoice_context(
+    provider: str,
+    request: OmniVoiceContextRequest,
+    _user: dict = Depends(current_user),
+) -> OmniVoiceContext:
+    """Create a new speech context (omit id) or modify an existing one (with id)."""
+    _require_omnivoice(provider)
+    contexts = _load_omnivoice_contexts()
+    context_id = (request.id or "").strip() or new_id("ctx")
+    entry = {
+        "id": context_id,
+        "name": request.name,
+        "instruct": request.instruct,
+        "language": request.language,
+        "settings": request.settings.model_dump(),
+    }
+    for index, existing in enumerate(contexts):
+        if existing.get("id") == context_id:
+            contexts[index] = entry
+            break
+    else:
+        contexts.append(entry)
+    _save_omnivoice_contexts(contexts)
+    return OmniVoiceContext.model_validate(entry)
+
+
+@app.delete(
+    "/api/{provider}/speech-contexts/{context_id}",
+    response_model=OmniVoiceContext,
+    tags=["Voices"],
+    summary="Delete an OmniVoice speech context",
+    response_description="The removed speech context.",
+)
+def delete_omnivoice_context(
+    provider: str,
+    context_id: Annotated[str, ApiPath(description="Speech-context id to remove.")],
+    _user: dict = Depends(current_user),
+) -> OmniVoiceContext:
+    _require_omnivoice(provider)
+    contexts = _load_omnivoice_contexts()
+    removed = next((ctx for ctx in contexts if ctx.get("id") == context_id), None)
+    if removed is None:
+        raise HTTPException(status_code=404, detail="Speech context not found.")
+    _save_omnivoice_contexts([ctx for ctx in contexts if ctx.get("id") != context_id])
+    return OmniVoiceContext.model_validate(removed)
+
+
+@app.post(
+    "/api/{provider}/speech-contexts/preview",
+    response_model=OmniVoiceContextPreview,
+    tags=["Voices"],
+    summary="Preview a speech context's voice design",
+    response_description="Base64 WAV preview audio for the supplied design + settings.",
+)
+async def preview_omnivoice_context(
+    provider: str,
+    request: OmniVoiceContextPreviewRequest,
+    _user: dict = Depends(current_user),
+) -> OmniVoiceContextPreview:
+    """Design-only preview (no sample): synthesize from instruct + settings."""
+    _require_omnivoice(provider)
+    settings = _omnivoice_settings({"settings": request.settings.model_dump()})
+    item: dict = {"text": request.text, "instruct": request.instruct, "language": str(request.language or "en")}
+    if settings.get("speed") is not None:
+        item["speed"] = settings["speed"]
+    if settings.get("duration"):
+        item["duration"] = settings["duration"]
+    try:
+        payload = await client_for(provider).run_batch(
+            {"items": [item], "audio_format": "wav", **_omnivoice_top_level(settings)}
+        )
+    except OmniVoiceError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    row = (payload.get("results") or [{}])[0]
+    if row.get("status") != "success" or not row.get("audio_b64"):
+        raise HTTPException(status_code=400, detail=str(row.get("error") or "OmniVoice returned no audio. Try again."))
+    return OmniVoiceContextPreview(audio_b64=row["audio_b64"], audio_format="wav", duration=row.get("duration"))
+
+
+@app.post(
+    "/api/{provider}/voices/clone",
     response_model=VoiceRecord,
     tags=["Voices"],
     summary="Clone a voice from a sample",
     response_description="Saved registry record for the cloned ElevenLabs voice.",
 )
 async def clone_voice(
+    provider: str,
     name: Annotated[str, Form(min_length=1, description="Name for the cloned voice.")],
     accent: Annotated[str, Form(description="Accent bucket to store with the cloned voice.")] = "neutral",
     consent_confirmed: Annotated[
@@ -944,6 +1190,10 @@ async def clone_voice(
     description: Annotated[
         str,
         Form(description="Optional provider description. A safe default is used when empty."),
+    ] = "",
+    reference_text: Annotated[
+        str,
+        Form(description="OmniVoice only: optional transcript of the sample to guide cloning."),
     ] = "",
     sample: UploadFile = File(..., description="Consented voice sample file, such as mp3, wav, m4a, or webm."),
     _user: dict = Depends(current_user),
@@ -955,13 +1205,45 @@ async def clone_voice(
     that supports instant voice cloning. The uploaded sample is stored under the
     app data directory for auditability.
     """
+    provider = validate_provider(provider)
     if not consent_confirmed:
         raise HTTPException(status_code=400, detail="Consent confirmation is required before cloning.")
 
+    provider_storage = storage_for(provider)
+    registry = registry_for(provider)
     record_id = new_id("voice")
-    source_path = storage.source_audio_path(record_id, sample.filename or "sample.audio")
+    source_path = provider_storage.source_audio_path(record_id, sample.filename or "sample.audio")
     source_path.parent.mkdir(parents=True, exist_ok=True)
     source_path.write_bytes(await sample.read())
+
+    if provider == "omnivoice":
+        timestamp = now_utc()
+        voice_id = new_id("ov_clone")
+        omnivoice_metadata = {
+            "provider": "omnivoice",
+            "mode": "clone",
+            "description": description,
+            "voice_message_studio_profile": {
+                "language": "en",
+                "accent": accent,
+                "use_case": "conversational",
+            },
+        }
+        if reference_text.strip():
+            omnivoice_metadata["reference_text"] = reference_text.strip()
+        record = VoiceRecord(
+            id=record_id,
+            display_name=name,
+            voice_id=voice_id,
+            source_type="cloned",
+            accent=accent,
+            consent_status="confirmed",
+            source_audio_path=provider_storage.relative_to_data(source_path),
+            provider_metadata=omnivoice_metadata,
+            created_at=timestamp,
+            updated_at=timestamp,
+        )
+        return registry.upsert_record(record)
 
     try:
         provider_voice = await elevenlabs.clone_voice(
@@ -985,12 +1267,12 @@ async def clone_voice(
         source_type="cloned",
         accent=accent,
         consent_status="confirmed",
-        source_audio_path=storage.relative_to_data(source_path),
+        source_audio_path=provider_storage.relative_to_data(source_path),
         provider_metadata=provider_voice,
         created_at=timestamp,
         updated_at=timestamp,
     )
-    return voice_registry.upsert_record(record)
+    return registry.upsert_record(record)
 
 
 def _job_status(rows: list[AudioResult], total: int) -> str:
@@ -1005,6 +1287,7 @@ def _job_status(rows: list[AudioResult], total: int) -> str:
 
 
 def _save_job_manifest(
+    provider_storage: StorageService,
     job_id: str,
     kind: str,
     created_at: datetime,
@@ -1023,18 +1306,18 @@ def _save_job_manifest(
         rows=rows,
         workbook_url=workbook_url,
     )
-    storage.save_job_manifest(job_id, detail.model_dump(mode="json"))
+    provider_storage.save_job_manifest(job_id, detail.model_dump(mode="json"))
     return detail
 
 
 @app.post(
-    "/api/tts",
+    "/api/{provider}/tts",
     response_model=AudioResult,
     tags=["Generate"],
     summary="Generate one voice note",
     response_description="Single-row generation result with download URLs when completed.",
 )
-async def create_tts(request: TtsRequest, _user: dict = Depends(current_user)) -> AudioResult:
+async def create_tts(provider: str, request: TtsRequest, _user: dict = Depends(current_user)) -> AudioResult:
     """
     Generate one MP3 voice note and persist it as a job.
 
@@ -1042,14 +1325,17 @@ async def create_tts(request: TtsRequest, _user: dict = Depends(current_user)) -
     `max_seconds` is the hard LinkedIn-style limit used for red measured-duration
     warnings. Set `export_m4a=true` to also write a mono AAC `.m4a` file.
     """
+    provider = validate_provider(provider)
+    provider_storage = storage_for(provider)
     job_id = new_id("job")
     created_at = datetime.now(timezone.utc)
-    row = await generate_row(job_id, 1, request)
-    _save_job_manifest(job_id, "single", created_at, [row])
+    row = await generate_row(provider, job_id, 1, request)
+    _save_job_manifest(provider_storage, job_id, "single", created_at, [row])
     return row
 
 
 def _write_job_progress(
+    provider_storage: StorageService,
     job_id: str,
     created_at: datetime,
     *,
@@ -1071,54 +1357,155 @@ def _write_job_progress(
         workbook_url=workbook_url,
         error=error,
     )
-    storage.save_job_manifest(job_id, detail.model_dump(mode="json"))
+    provider_storage.save_job_manifest(job_id, detail.model_dump(mode="json"))
 
 
-async def run_batch_job(job_id: str, created_at: datetime, requests: list[TtsRequest]) -> None:
-    """Background runner: generate rows concurrently and keep the manifest updated."""
+async def _generate_rows_individually(
+    provider: str,
+    provider_storage: StorageService,
+    job_id: str,
+    created_at: datetime,
+    requests: list[TtsRequest],
+) -> dict[int, AudioResult]:
+    """One provider call per row, concurrently (bounded by the generation semaphore)."""
     total = len(requests)
     results: dict[int, AudioResult] = {}
 
-    def ordered_rows() -> list[AudioResult]:
-        return [results[index] for index in sorted(results)]
-
     async def run_one(index: int, request: TtsRequest) -> None:
-        result = await generate_row(job_id, index, request)
+        result = await generate_row(provider, job_id, index, request)
         # No await between mutation and the write, so it is atomic on the event loop.
         results[index] = result
-        _write_job_progress(job_id, created_at, status="running", total_rows=total, rows=ordered_rows())
+        _write_job_progress(
+            provider_storage,
+            job_id,
+            created_at,
+            status="running",
+            total_rows=total,
+            rows=[results[i] for i in sorted(results)],
+        )
 
+    await asyncio.gather(*(run_one(i, r) for i, r in enumerate(requests, start=1)))
+    return results
+
+
+async def _generate_omnivoice_batch(
+    provider_storage: StorageService,
+    job_id: str,
+    created_at: datetime,
+    requests: list[TtsRequest],
+) -> dict[int, AudioResult]:
+    """Send rows to the OmniVoice space in chunks (one /batch call per chunk)."""
+    registry = registry_for("omnivoice")
+    omnivoice = client_for("omnivoice")
+    total = len(requests)
+    results: dict[int, AudioResult] = {}
+
+    def write_running() -> None:
+        _write_job_progress(
+            provider_storage,
+            job_id,
+            created_at,
+            status="running",
+            total_rows=total,
+            rows=[results[i] for i in sorted(results)],
+        )
+
+    # Build each row's item + its batch-global settings. Rows whose voice can't be
+    # resolved fail immediately. The top-level settings (steps/guidance/denoise/...)
+    # apply per /batch call, so rows are grouped by those settings before chunking.
+    groups: dict[tuple, list[tuple[int, TtsRequest, dict]]] = {}
+    for index, request in enumerate(requests, start=1):
+        try:
+            item, row_settings = _omnivoice_item(provider_storage, registry, request)
+        except OmniVoiceError as exc:
+            results[index] = _failed_audio_row("omnivoice", job_id, index, request, exc, now_utc())
+            continue
+        top_level = _omnivoice_top_level(row_settings)
+        groups.setdefault(tuple(sorted(top_level.items())), []).append((index, request, item))
+    if results:
+        write_running()
+
+    chunk_size = max(1, settings.omnivoice_batch_chunk)
+    for signature, entries in groups.items():
+        top_level = dict(signature)
+        for start in range(0, len(entries), chunk_size):
+            chunk = entries[start : start + chunk_size]
+            async with _generation_semaphore:
+                try:
+                    response = await omnivoice.run_batch(
+                        {"items": [item for (_, _, item) in chunk], "audio_format": "wav", **top_level}
+                    )
+                    out = response.get("results") or []
+                except OmniVoiceError as exc:
+                    for index, request, _item in chunk:
+                        results[index] = _failed_audio_row("omnivoice", job_id, index, request, exc, now_utc())
+                    write_running()
+                    continue
+                for offset, (index, request, _item) in enumerate(chunk):
+                    created = now_utc()
+                    row_payload = out[offset] if offset < len(out) else {}
+                    if row_payload.get("status") != "success" or not row_payload.get("audio_b64"):
+                        err = OmniVoiceError(str(row_payload.get("error") or "OmniVoice returned no audio."))
+                        results[index] = _failed_audio_row("omnivoice", job_id, index, request, err, created)
+                        continue
+                    try:
+                        wav_bytes = base64.b64decode(row_payload["audio_b64"])
+                        results[index] = await _finalize_audio_row(
+                            provider_storage,
+                            job_id,
+                            index,
+                            request,
+                            audio_bytes=wav_bytes,
+                            source_format="wav",
+                            model_id="omnivoice_batch_space",
+                            created_at=created,
+                        )
+                    except (subprocess.CalledProcessError, OSError, ValueError, KeyError) as exc:
+                        results[index] = _failed_audio_row("omnivoice", job_id, index, request, exc, created)
+            write_running()
+    return results
+
+
+async def run_batch_job(provider: str, job_id: str, created_at: datetime, requests: list[TtsRequest]) -> None:
+    """Background runner: generate rows, keep the manifest updated, finalize the job."""
+    provider_storage = storage_for(provider)
+    total = len(requests)
     try:
-        await asyncio.gather(*(run_one(i, r) for i, r in enumerate(requests, start=1)))
-        rows = ordered_rows()
-        workbook_path = storage.job_folder(job_id) / "tts_results.xlsx"
+        if provider == "omnivoice":
+            results = await _generate_omnivoice_batch(provider_storage, job_id, created_at, requests)
+        else:
+            results = await _generate_rows_individually(provider, provider_storage, job_id, created_at, requests)
+        rows = [results[i] for i in sorted(results)]
+        workbook_path = provider_storage.job_folder(job_id) / "tts_results.xlsx"
         await asyncio.to_thread(
             workbooks.write_results, workbook_path, [row.model_dump(mode="json") for row in rows]
         )
         _write_job_progress(
+            provider_storage,
             job_id,
             created_at,
             status=_job_status(rows, total),
             total_rows=total,
             rows=rows,
-            workbook_url=storage.file_url(workbook_path),
+            workbook_url=provider_storage.file_url(workbook_path),
         )
     except Exception as exc:  # finalize as failed rather than leaving the job 'running'
         logger.exception("Batch job %s failed", job_id)
         _write_job_progress(
-            job_id, created_at, status="failed", total_rows=total, rows=ordered_rows(), error=str(exc)
+            provider_storage, job_id, created_at, status="failed", total_rows=total, rows=[], error=str(exc)
         )
 
 
 @app.post(
-    "/api/tts/batch",
+    "/api/{provider}/tts/batch",
     status_code=202,
     response_model=JobSummary,
     tags=["Generate"],
     summary="Submit an .xlsx batch (async)",
-    response_description="Accepted job. Poll GET /api/jobs/{job_id} for status, progress, and results.",
+    response_description="Accepted job. Poll GET /api/{provider}/jobs/{job_id} for status, progress, and results.",
 )
 async def create_batch(
+    provider: str,
     file: UploadFile = File(
         ...,
         description=(
@@ -1134,30 +1521,32 @@ async def create_batch(
 
     The workbook is parsed and validated synchronously (bad file or over-limit row
     counts fail here with 400). Generation then runs asynchronously: poll
-    `GET /api/jobs/{job_id}` until `status` is `completed`, `partial`, `failed`, or
-    `interrupted`, then download via `GET /api/jobs/{job_id}/download`. CSV is
+    `GET /api/{provider}/jobs/{job_id}` until `status` is `completed`, `partial`, `failed`, or
+    `interrupted`, then download via `GET /api/{provider}/jobs/{job_id}/download`. CSV is
     rejected because message text may contain commas.
     """
+    provider = validate_provider(provider)
+    provider_storage = storage_for(provider)
     if not (file.filename or "").lower().endswith(".xlsx"):
         raise HTTPException(status_code=400, detail="Upload an .xlsx workbook, not CSV.")
 
     job_id = new_id("job")
     created_at = datetime.now(timezone.utc)
-    source_path = storage.job_folder(job_id) / "source.xlsx"
+    source_path = provider_storage.job_folder(job_id) / "source.xlsx"
     source_path.parent.mkdir(parents=True, exist_ok=True)
     source_path.write_bytes(await file.read())
 
     try:
         requests = workbooks.parse_requests(source_path)
     except WorkbookError as exc:
-        shutil.rmtree(storage.job_folder(job_id), ignore_errors=True)
+        shutil.rmtree(provider_storage.job_folder(job_id), ignore_errors=True)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     if not requests:
-        shutil.rmtree(storage.job_folder(job_id), ignore_errors=True)
+        shutil.rmtree(provider_storage.job_folder(job_id), ignore_errors=True)
         raise HTTPException(status_code=400, detail="The workbook has no data rows.")
     if len(requests) > settings.max_batch_rows:
-        shutil.rmtree(storage.job_folder(job_id), ignore_errors=True)
+        shutil.rmtree(provider_storage.job_folder(job_id), ignore_errors=True)
         raise HTTPException(
             status_code=400,
             detail=(
@@ -1167,9 +1556,9 @@ async def create_batch(
         )
 
     total = len(requests)
-    _write_job_progress(job_id, created_at, status="running", total_rows=total, rows=[])
+    _write_job_progress(provider_storage, job_id, created_at, status="running", total_rows=total, rows=[])
 
-    task = asyncio.create_task(run_batch_job(job_id, created_at, requests))
+    task = asyncio.create_task(run_batch_job(provider, job_id, created_at, requests))
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
 
@@ -1185,17 +1574,19 @@ async def create_batch(
 
 
 @app.get(
-    "/api/jobs",
+    "/api/{provider}/jobs",
     response_model=list[JobSummary],
     tags=["History"],
     summary="List generation jobs",
     response_description="Jobs sorted newest first.",
 )
-def list_jobs(_user: dict = Depends(current_user)) -> list[JobSummary]:
+def list_jobs(provider: str, _user: dict = Depends(current_user)) -> list[JobSummary]:
     """List persisted single and batch generation jobs from the data directory."""
+    provider = validate_provider(provider)
+    provider_storage = storage_for(provider)
     summaries: list[JobSummary] = []
-    for job_id in storage.list_job_ids():
-        manifest = storage.read_job_manifest(job_id)
+    for job_id in provider_storage.list_job_ids():
+        manifest = provider_storage.read_job_manifest(job_id)
         if not manifest:
             continue
         summaries.append(JobSummary.model_validate(manifest))
@@ -1203,7 +1594,7 @@ def list_jobs(_user: dict = Depends(current_user)) -> list[JobSummary]:
 
 
 @app.get(
-    "/api/jobs/{job_id}/download",
+    "/api/{provider}/jobs/{job_id}/download",
     tags=["History"],
     summary="Download a job as a ZIP",
     response_class=Response,
@@ -1216,7 +1607,8 @@ def list_jobs(_user: dict = Depends(current_user)) -> list[JobSummary]:
     },
 )
 def download_job(
-    job_id: Annotated[str, ApiPath(description="Job id returned by /api/tts or /api/tts/batch.")],
+    provider: str,
+    job_id: Annotated[str, ApiPath(description="Job id returned by /api/{provider}/tts or /api/{provider}/tts/batch.")],
     _user: dict = Depends(current_user),
 ) -> Response:
     """
@@ -1225,7 +1617,9 @@ def download_job(
     Each row can include transcript text, MP3, and M4A. If an M4A is missing but
     the MP3 exists, the endpoint attempts to create the M4A before zipping.
     """
-    manifest = storage.read_job_manifest(job_id)
+    provider = validate_provider(provider)
+    provider_storage = storage_for(provider)
+    manifest = provider_storage.read_job_manifest(job_id)
     if not manifest:
         raise HTTPException(status_code=404, detail="Job not found.")
     detail = JobDetail.model_validate(manifest)
@@ -1240,18 +1634,18 @@ def download_job(
             label = safe_filename(row.voice_name or row.voice_id or base)
             stem = f"{base}-{label}"
 
-            transcript_path = storage.job_row_path(job_id, index, "txt")
+            transcript_path = provider_storage.job_row_path(job_id, index, "txt")
             if transcript_path.exists():
                 archive.write(transcript_path, f"{stem}.txt")
             elif row.text:
                 archive.writestr(f"{stem}.txt", row.text)
 
-            mp3_path = storage.job_row_path(job_id, index, "mp3")
+            mp3_path = provider_storage.job_row_path(job_id, index, "mp3")
             if not mp3_path.exists():
                 continue
             archive.write(mp3_path, f"{stem}.mp3")
 
-            m4a_path = storage.job_row_path(job_id, index, "m4a")
+            m4a_path = provider_storage.job_row_path(job_id, index, "m4a")
             if not m4a_path.exists():
                 try:
                     audio_export_service.export_linkedin_m4a(mp3_path, m4a_path)
@@ -1269,25 +1663,27 @@ def download_job(
 
 
 @app.get(
-    "/api/jobs/{job_id}",
+    "/api/{provider}/jobs/{job_id}",
     response_model=JobDetail,
     tags=["History"],
     summary="Get one job with rows",
     response_description="Full job manifest with row-level results.",
 )
 def get_job(
-    job_id: Annotated[str, ApiPath(description="Job id returned by /api/tts or /api/tts/batch.")],
+    provider: str,
+    job_id: Annotated[str, ApiPath(description="Job id returned by /api/{provider}/tts or /api/{provider}/tts/batch.")],
     _user: dict = Depends(current_user),
 ) -> JobDetail:
     """Return one persisted job manifest including all row results."""
-    manifest = storage.read_job_manifest(job_id)
+    provider = validate_provider(provider)
+    manifest = storage_for(provider).read_job_manifest(job_id)
     if not manifest:
         raise HTTPException(status_code=404, detail="Job not found.")
     return JobDetail.model_validate(manifest)
 
 
 @app.get(
-    "/files/{relative_path:path}",
+    "/api/{provider}/files/{relative_path:path}",
     tags=["Files"],
     summary="Download a generated file",
     response_class=FileResponse,
@@ -1298,6 +1694,7 @@ def get_job(
     },
 )
 def serve_data_file(
+    provider: str,
     relative_path: Annotated[str, ApiPath(description="Path relative to DATA_DIR, as returned in result URLs.")],
     _user: dict = Depends(current_user),
 ) -> FileResponse:
@@ -1307,8 +1704,10 @@ def serve_data_file(
     The path is resolved strictly under `DATA_DIR`; attempts to escape the data
     directory are rejected.
     """
+    provider = validate_provider(provider)
+    provider_storage = storage_for(provider)
     try:
-        path = storage.resolve_file(relative_path)
+        path = provider_storage.resolve_file(relative_path)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="Invalid file path.") from exc
     if not path.exists() or not path.is_file():
@@ -1316,98 +1715,250 @@ def serve_data_file(
     return FileResponse(path)
 
 
-async def generate_row(job_id: str, index: int, request: TtsRequest) -> AudioResult:
-    created_at = datetime.now(timezone.utc)
+@app.get("/files/{relative_path:path}", include_in_schema=False)
+def serve_legacy_elevenlabs_file(
+    relative_path: str,
+    _user: dict = Depends(current_user),
+) -> FileResponse:
+    """Backward-compatible file route for older ElevenLabs manifests."""
+    try:
+        path = storage_for("elevenlabs").resolve_file(relative_path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid file path.") from exc
+    if not path.exists() or not path.is_file():
+        raise HTTPException(status_code=404, detail="File not found.")
+    return FileResponse(path)
+
+
+_GENERATION_ERRORS = (
+    ElevenLabsError,
+    OmniVoiceError,
+    subprocess.CalledProcessError,
+    ValidationError,
+    OSError,
+    ValueError,
+)
+
+
+_OMNIVOICE_DEFAULT_SETTINGS = {
+    "speed": 1.0,
+    "duration": None,
+    "num_step": 32,
+    "guidance_scale": 2.0,
+    "denoise": True,
+    "preprocess_prompt": True,
+    "postprocess_output": True,
+}
+
+
+def _omnivoice_settings(metadata: dict) -> dict:
+    """Merge a voice/tone's saved generation settings over the Space defaults."""
+    settings = dict(_OMNIVOICE_DEFAULT_SETTINGS)
+    saved = metadata.get("settings")
+    if isinstance(saved, dict):
+        settings.update({key: saved[key] for key in settings if key in saved})
+    return settings
+
+
+def _omnivoice_top_level(settings: dict) -> dict:
+    """Batch-global OmniVoice payload keys (apply to every item in one /batch call)."""
+    return {
+        "num_step": settings["num_step"],
+        "guidance_scale": settings["guidance_scale"],
+        "denoise": settings["denoise"],
+        "preprocess_prompt": settings["preprocess_prompt"],
+        "postprocess_output": settings["postprocess_output"],
+    }
+
+
+def _omnivoice_item(
+    provider_storage: StorageService, registry: VoiceRegistry, request: TtsRequest
+) -> tuple[dict, dict]:
+    """Build one OmniVoice batch item: a voice sample (clone) styled by a speech context.
+
+    OmniVoice generation needs both a saved voice (uploaded sample) and a speech
+    context (voice design + settings). `request.speech_context` carries the context id.
+    """
+    record = registry.find_by_provider_voice_id(request.voice_id)
+    if record is None or not record.source_audio_path:
+        raise OmniVoiceError("Select an uploaded OmniVoice voice sample before generating audio.")
+    context = _get_omnivoice_context(request.speech_context)
+    if context is None:
+        raise OmniVoiceError("Select a saved OmniVoice speech context before generating audio.")
+
+    voice_meta = record.provider_metadata or {}
+    settings = _omnivoice_settings(context)
+    source_path = provider_storage.resolve_file(record.source_audio_path)
+    item: dict = {
+        "text": request.text,
+        "ref_audio_b64": base64.b64encode(source_path.read_bytes()).decode("ascii"),
+        "language": str(context.get("language") or "en"),
+    }
+    if voice_meta.get("reference_text"):
+        item["ref_text"] = str(voice_meta["reference_text"])
+    instruct = str(context.get("instruct") or "").strip()
+    if instruct:
+        item["instruct"] = instruct
+    if settings.get("speed") is not None:
+        item["speed"] = settings["speed"]
+    if settings.get("duration"):
+        item["duration"] = settings["duration"]
+    return item, settings
+
+
+async def _finalize_audio_row(
+    provider_storage: StorageService,
+    job_id: str,
+    index: int,
+    request: TtsRequest,
+    *,
+    audio_bytes: bytes,
+    source_format: str,
+    model_id: str | None,
+    created_at: datetime,
+) -> AudioResult:
+    """Persist audio (transcoding wav->mp3 when needed), measure, optional m4a, build the result."""
     estimated_seconds = duration_service.estimate_seconds(request.text, request.wpm)
     max_seconds = settings.max_duration_seconds
+    mp3_path = provider_storage.job_row_path(job_id, index, "mp3")
+    mp3_path.parent.mkdir(parents=True, exist_ok=True)
+    if source_format == "mp3":
+        mp3_path.write_bytes(audio_bytes)
+        measure_path = mp3_path
+    else:
+        wav_path = provider_storage.job_row_path(job_id, index, "wav")
+        wav_path.write_bytes(audio_bytes)
+        await asyncio.to_thread(audio_export_service.export_mp3, wav_path, mp3_path)
+        measure_path = wav_path
+
+    transcript_path = provider_storage.job_row_path(job_id, index, "txt")
+    transcript_path.write_text(request.text, encoding="utf-8")
+
+    actual_seconds = await asyncio.to_thread(duration_service.measure_seconds, measure_path)
+    warning = None
+    if actual_seconds > max_seconds:
+        warning = WarningState(
+            level="red",
+            code="hard_limit_exceeded",
+            message=(
+                f"Generated audio is {actual_seconds:.1f}s, above the "
+                f"{max_seconds}s LinkedIn voice-note limit."
+            ),
+        )
+
+    m4a_url = None
+    if request.export_m4a:
+        m4a_path = provider_storage.job_row_path(job_id, index, "m4a")
+        await asyncio.to_thread(audio_export_service.export_linkedin_m4a, mp3_path, m4a_path)
+        m4a_url = provider_storage.file_url(m4a_path)
+
+    return AudioResult(
+        job_id=job_id,
+        index=index,
+        status="completed",
+        text=request.text,
+        voice_id=request.voice_id,
+        voice_name=request.voice_name,
+        model_id=model_id,
+        speech_context=request.speech_context,
+        accent=request.accent,
+        estimated_seconds=estimated_seconds,
+        target_seconds=request.target_seconds,
+        max_seconds=max_seconds,
+        actual_seconds=actual_seconds,
+        warning=warning,
+        mp3_url=provider_storage.file_url(mp3_path),
+        m4a_url=m4a_url,
+        transcript_url=provider_storage.file_url(transcript_path),
+        created_at=created_at,
+    )
+
+
+def _failed_audio_row(
+    provider: str,
+    job_id: str,
+    index: int,
+    request: TtsRequest,
+    exc: Exception,
+    created_at: datetime,
+) -> AudioResult:
+    logger.warning("Generation failed for job %s row %s: %s", job_id, index, exc)
+    estimated_seconds = duration_service.estimate_seconds(request.text, request.wpm)
+    warning = None
+    if estimated_seconds > request.target_seconds:
+        warning = WarningState(
+            level="yellow",
+            code="estimated_target_exceeded",
+            message=(
+                f"Estimated duration is {estimated_seconds:.1f}s, above the "
+                f"{request.target_seconds}s target. Generation failed before measuring actual audio."
+            ),
+        )
+    return AudioResult(
+        job_id=job_id,
+        index=index,
+        status="failed",
+        text=request.text,
+        voice_id=request.voice_id,
+        voice_name=request.voice_name,
+        model_id=settings.elevenlabs_model_id if provider == "elevenlabs" else "omnivoice_batch_space",
+        speech_context=request.speech_context,
+        accent=request.accent,
+        estimated_seconds=estimated_seconds,
+        target_seconds=request.target_seconds,
+        max_seconds=settings.max_duration_seconds,
+        warning=warning,
+        error=str(exc),
+        created_at=created_at,
+    )
+
+
+async def generate_row(provider: str, job_id: str, index: int, request: TtsRequest) -> AudioResult:
+    """Generate one row for the given provider (single call). Never raises."""
+    provider = validate_provider(provider)
+    provider_storage = storage_for(provider)
+    provider_registry = registry_for(provider)
+    created_at = now_utc()
 
     # Bound concurrent generation, and run blocking ffmpeg/ffprobe off the event loop.
     async with _generation_semaphore:
         try:
-            mp3_bytes = await elevenlabs.text_to_speech(
-                voice_id=request.voice_id,
-                text=request.text,
-                speech_context=request.speech_context,
+            if provider == "elevenlabs":
+                mp3_bytes = await elevenlabs.text_to_speech(
+                    voice_id=request.voice_id,
+                    text=request.text,
+                    speech_context=request.speech_context,
+                )
+                return await _finalize_audio_row(
+                    provider_storage,
+                    job_id,
+                    index,
+                    request,
+                    audio_bytes=mp3_bytes,
+                    source_format="mp3",
+                    model_id=settings.elevenlabs_model_id,
+                    created_at=created_at,
+                )
+
+            item, gen_settings = _omnivoice_item(provider_storage, provider_registry, request)
+            payload = await client_for(provider).run_batch(
+                {"items": [item], "audio_format": "wav", **_omnivoice_top_level(gen_settings)}
             )
-            mp3_path = storage.job_row_path(job_id, index, "mp3")
-            mp3_path.parent.mkdir(parents=True, exist_ok=True)
-            mp3_path.write_bytes(mp3_bytes)
-
-            transcript_path = storage.job_row_path(job_id, index, "txt")
-            transcript_path.write_text(request.text, encoding="utf-8")
-
-            actual_seconds = await asyncio.to_thread(duration_service.measure_seconds, mp3_path)
-            warning = None
-            if actual_seconds > max_seconds:
-                warning = WarningState(
-                    level="red",
-                    code="hard_limit_exceeded",
-                    message=(
-                        f"Generated audio is {actual_seconds:.1f}s, above the "
-                        f"{max_seconds}s LinkedIn voice-note limit."
-                    ),
-                )
-
-            m4a_url = None
-            if request.export_m4a:
-                m4a_path = storage.job_row_path(job_id, index, "m4a")
-                await asyncio.to_thread(
-                    audio_export_service.export_linkedin_m4a, mp3_path, m4a_path
-                )
-                m4a_url = storage.file_url(m4a_path)
-
-            result = AudioResult(
-                job_id=job_id,
-                index=index,
-                status="completed",
-                text=request.text,
-                voice_id=request.voice_id,
-                voice_name=request.voice_name,
-                model_id=settings.elevenlabs_model_id,
-                speech_context=request.speech_context,
-                accent=request.accent,
-                estimated_seconds=estimated_seconds,
-                target_seconds=request.target_seconds,
-                max_seconds=max_seconds,
-                actual_seconds=actual_seconds,
-                warning=warning,
-                mp3_url=storage.file_url(mp3_path),
-                m4a_url=m4a_url,
-                transcript_url=storage.file_url(transcript_path),
+            row_payload = (payload.get("results") or [{}])[0]
+            if row_payload.get("status") != "success" or not row_payload.get("audio_b64"):
+                raise OmniVoiceError(str(row_payload.get("error") or "OmniVoice returned no audio."))
+            return await _finalize_audio_row(
+                provider_storage,
+                job_id,
+                index,
+                request,
+                audio_bytes=base64.b64decode(row_payload["audio_b64"]),
+                source_format="wav",
+                model_id="omnivoice_batch_space",
                 created_at=created_at,
             )
-            return result
-        except (ElevenLabsError, subprocess.CalledProcessError, ValidationError, OSError, ValueError) as exc:
-            logger.warning("Generation failed for job %s row %s: %s", job_id, index, exc)
-            warning = None
-            if estimated_seconds > request.target_seconds:
-                warning = WarningState(
-                    level="yellow",
-                    code="estimated_target_exceeded",
-                    message=(
-                        f"Estimated duration is {estimated_seconds:.1f}s, above the "
-                        f"{request.target_seconds}s target. Generation failed before measuring actual audio."
-                    ),
-                )
-            result = AudioResult(
-                job_id=job_id,
-                index=index,
-                status="failed",
-                text=request.text,
-                voice_id=request.voice_id,
-                voice_name=request.voice_name,
-                model_id=settings.elevenlabs_model_id,
-                speech_context=request.speech_context,
-                accent=request.accent,
-                estimated_seconds=estimated_seconds,
-                target_seconds=request.target_seconds,
-                max_seconds=max_seconds,
-                warning=warning,
-                error=str(exc),
-                created_at=created_at,
-            )
-
-    return result
+        except _GENERATION_ERRORS as exc:
+            return _failed_audio_row(provider, job_id, index, request, exc, created_at)
 
 if settings.static_dir.exists():
     app.mount("/assets", StaticFiles(directory=settings.static_dir / "assets"), name="assets")

@@ -150,14 +150,77 @@ class ProviderVoiceByIdRequest(BaseModel):
     model_config = {"json_schema_extra": {"example": {"voice_id": "21m00Tcm4TlvDq8ikWAM"}}}
 
 
+class OmniVoiceToneSettings(BaseModel):
+    """OmniVoice generation settings captured in a tone (maps to the Space payload)."""
+
+    speed: float = Field(1.0, ge=0.5, le=1.5, description="1.0 normal; >1 faster, <1 slower. Ignored if duration is set.")
+    duration: float | None = Field(
+        default=None, ge=0, description="Fixed seconds to override speed. 0/empty uses speed."
+    )
+    num_step: int = Field(32, ge=4, le=64, description="Inference steps. Lower=faster, higher=quality.")
+    guidance_scale: float = Field(2.0, ge=0, le=4, description="Classifier-free guidance scale (CFG).")
+    denoise: bool = Field(True, description="Denoise the generated audio.")
+    preprocess_prompt: bool = Field(True, description="Trim/clean reference audio and reference text.")
+    postprocess_output: bool = Field(True, description="Remove long silences from the output.")
+
+
+class OmniVoiceContext(BaseModel):
+    """A saved OmniVoice speech context: a named voice-design + generation settings."""
+
+    id: str = Field(description="Stable speech-context id.")
+    name: str = Field(description="Display name shown in the Generate context picker.")
+    instruct: str = Field(description="Voice-design attributes, e.g. 'male, american accent, middle-aged'.")
+    language: str | None = Field(default=None, description="Language code, or null to auto-detect.")
+    settings: OmniVoiceToneSettings = Field(default_factory=OmniVoiceToneSettings)
+
+
+class OmniVoiceContextRequest(BaseModel):
+    """Create or modify an OmniVoice speech context."""
+
+    id: str | None = Field(default=None, description="Existing context id to modify; omit to add a new one.")
+    name: str = Field(min_length=1, description="Context name shown in the picker.")
+    instruct: str = Field(min_length=1, description="Voice-design attributes for this context.")
+    language: str | None = Field(default=None, description="Language code, or null to auto-detect.")
+    settings: OmniVoiceToneSettings = Field(default_factory=OmniVoiceToneSettings)
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "name": "Outreach",
+                "instruct": "male, american accent, middle-aged, very high pitch",
+                "language": None,
+                "settings": {"speed": 1.1, "num_step": 64, "guidance_scale": 4.0},
+            }
+        }
+    }
+
+
+class OmniVoiceContextPreviewRequest(BaseModel):
+    """Preview a speech-context's design audio without saving (design-only, no sample)."""
+
+    text: str = Field(min_length=1, description="Text to synthesize for the preview.")
+    instruct: str = Field(min_length=1, description="Voice-design attributes to preview.")
+    language: str | None = Field(default=None, description="Language code, or null to auto-detect.")
+    settings: OmniVoiceToneSettings = Field(default_factory=OmniVoiceToneSettings)
+
+
+class OmniVoiceContextPreview(BaseModel):
+    audio_b64: str = Field(description="Base64 WAV preview audio.")
+    audio_format: str = Field(default="wav", description="Preview audio format.")
+    duration: float | None = Field(default=None, description="Reported duration in seconds when available.")
+
+
 class TtsRequest(BaseModel):
     text: str = Field(min_length=1, description="Text to synthesize into one voice note.")
     voice_id: str = Field(min_length=1, description="ElevenLabs voice id to use.")
     voice_name: str | None = Field(default=None, description="Optional display name stored with the result.")
     accent: Accent = Field(default="neutral", description="Accent bucket recorded with the generated result.")
-    speech_context: SpeechContext = Field(
+    speech_context: str = Field(
         default="outreach_conversational",
-        description="Delivery context that maps to ElevenLabs voice settings and optional v3 delivery tags.",
+        description=(
+            "ElevenLabs: one of the built-in delivery contexts. OmniVoice: a saved "
+            "speech-context id carrying the voice design + generation settings."
+        ),
     )
     target_seconds: int = Field(default=55, ge=1, le=60, description="Soft target duration for yellow warnings.")
     wpm: int = Field(default=135, ge=60, le=240, description="Words-per-minute estimate used before generation.")
@@ -193,7 +256,7 @@ class AudioResult(BaseModel):
     voice_id: str = Field(description="ElevenLabs voice id used for this row.")
     voice_name: str | None = Field(default=None, description="Optional voice display name.")
     model_id: str | None = Field(default=None, description="ElevenLabs model id used.")
-    speech_context: SpeechContext = Field(description="Speech context used for voice settings.")
+    speech_context: str = Field(description="Speech context used for this row (delivery context id or OmniVoice context id).")
     accent: Accent = Field(description="Accent bucket recorded with this row.")
     estimated_seconds: float = Field(description="Estimated duration from text and WPM.")
     target_seconds: int = Field(description="Soft target duration.")

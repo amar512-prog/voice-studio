@@ -53,6 +53,10 @@ class StorageService:
     def registry_path(self) -> Path:
         return self.voices_dir / "registry.json"
 
+    @property
+    def speech_contexts_path(self) -> Path:
+        return self.root / "speech_contexts.json"
+
     def read_json(self, path: Path, default):
         if not path.exists():
             return default
@@ -104,7 +108,7 @@ class StorageService:
         return path.resolve().relative_to(self.root.resolve()).as_posix()
 
     def file_url(self, path: Path) -> str:
-        return f"/files/{self.relative_to_data(path)}"
+        return f"/api/{self.provider}/files/{self.relative_to_data(path)}"
 
     def resolve_file(self, relative_path: str) -> Path:
         candidate = (self.root / relative_path).resolve()

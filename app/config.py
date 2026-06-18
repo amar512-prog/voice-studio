@@ -11,6 +11,15 @@ class Settings:
         self.elevenlabs_base_url = os.getenv("ELEVENLABS_BASE_URL", "https://api.elevenlabs.io/v1")
         self.elevenlabs_model_id = os.getenv("ELEVENLABS_MODEL_ID", "eleven_v3")
         self.elevenlabs_language_code = os.getenv("ELEVENLABS_LANGUAGE_CODE", "en")
+        self.huggingface_token = os.getenv("HUGGINGFACE_TOKEN", "").strip()
+        self.omnivoice_base_url = os.getenv(
+            "OMNIVOICE_BASE_URL",
+            "https://salmanbvps-omnivoice-batch-tts.hf.space",
+        ).rstrip("/")
+        self.omnivoice_timeout_seconds = max(30, int(os.getenv("OMNIVOICE_TIMEOUT_SECONDS", "240")))
+        # Rows sent to the OmniVoice space per /batch call (true batched inference).
+        # Keep modest so a single ZeroGPU request stays within its time budget.
+        self.omnivoice_batch_chunk = max(1, int(os.getenv("OMNIVOICE_BATCH_CHUNK", "6")))
         self.max_duration_seconds = int(os.getenv("LINKEDIN_MAX_SECONDS", "60"))
         self.default_target_seconds = int(os.getenv("DEFAULT_TARGET_SECONDS", "55"))
         self.default_wpm = int(os.getenv("DEFAULT_WPM", "135"))
