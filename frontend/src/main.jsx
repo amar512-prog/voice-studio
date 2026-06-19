@@ -2299,6 +2299,35 @@ function renderPromptTemplate(template, inputs, fields) {
 
 const MIN_TEXT_CONVERSION_TOKENS = 256;
 const MAX_TEXT_CONVERSION_TOKENS = 20000;
+const ADVANCED_TEXT_CONVERSION_INPUT_IDS = new Set([
+  "founder_name",
+  "company_name",
+  "verified_observation",
+  "pronunciation_notes"
+]);
+
+function ConversionInput({ field, value, onChange }) {
+  return (
+    <label>
+      {field.label}
+      {field.control === "textarea" ? (
+        <textarea
+          rows={field.id === "source_text" ? 8 : 3}
+          value={value}
+          onChange={(event) => onChange(field.id, event.target.value)}
+          placeholder={field.placeholder}
+        />
+      ) : (
+        <input
+          value={value}
+          onChange={(event) => onChange(field.id, event.target.value)}
+          placeholder={field.placeholder}
+        />
+      )}
+      {field.help && <small className="field-help">{field.help}</small>}
+    </label>
+  );
+}
 
 function TextConversionPage({ generateText, onApply }) {
   const [conversions, setConversions] = useState([]);
@@ -2306,6 +2335,7 @@ function TextConversionPage({ generateText, onApply }) {
   const [inputs, setInputs] = useState({});
   const [maxTokens, setMaxTokens] = useState("");
   const [showPurpose, setShowPurpose] = useState(false);
+  const [showAdvancedInputs, setShowAdvancedInputs] = useState(false);
   const [showPrompts, setShowPrompts] = useState(false);
   const [promptsEdited, setPromptsEdited] = useState(false);
   const [promptDrafts, setPromptDrafts] = useState({ system_prompt: "", user_prompt: "" });
@@ -2341,6 +2371,8 @@ function TextConversionPage({ generateText, onApply }) {
     [conversions, selectedId]
   );
   const fields = selected?.input_fields || [];
+  const primaryFields = fields.filter((field) => !ADVANCED_TEXT_CONVERSION_INPUT_IDS.has(field.id));
+  const advancedFields = fields.filter((field) => ADVANCED_TEXT_CONVERSION_INPUT_IDS.has(field.id));
   const sourceText = generateText || "";
 
   useEffect(() => {
@@ -2354,6 +2386,7 @@ function TextConversionPage({ generateText, onApply }) {
     });
     setResult(null);
     setPromptsEdited(false);
+    setShowAdvancedInputs(false);
     setMaxTokens(String(selected.default_max_tokens || 5000));
   }, [selected?.id]);
 
@@ -2514,27 +2547,42 @@ function TextConversionPage({ generateText, onApply }) {
             )}
 
             <div className="conversion-inputs">
-              {fields.map((field) => (
-                <label key={field.id}>
-                  {field.label}
-                  {field.control === "textarea" ? (
-                    <textarea
-                      rows={field.id === "source_text" ? 8 : 3}
-                      value={inputs[field.id] || ""}
-                      onChange={(event) => updateInput(field.id, event.target.value)}
-                      placeholder={field.placeholder}
-                    />
-                  ) : (
-                    <input
-                      value={inputs[field.id] || ""}
-                      onChange={(event) => updateInput(field.id, event.target.value)}
-                      placeholder={field.placeholder}
-                    />
-                  )}
-                  {field.help && <small className="field-help">{field.help}</small>}
-                </label>
+              {primaryFields.map((field) => (
+                <ConversionInput
+                  key={field.id}
+                  field={field}
+                  value={inputs[field.id] || ""}
+                  onChange={updateInput}
+                />
               ))}
             </div>
+
+            {advancedFields.length > 0 && (
+              <section className="conversion-advanced-inputs">
+                <button
+                  type="button"
+                  className="conversion-advanced-toggle"
+                  onClick={() => setShowAdvancedInputs((current) => !current)}
+                  aria-expanded={showAdvancedInputs}
+                  aria-controls="conversion-advanced-fields"
+                >
+                  {showAdvancedInputs ? <ChevronDown size={18} /> : <ChevronRight size={18} />}
+                  <span>Advanced inputs</span>
+                </button>
+                {showAdvancedInputs && (
+                  <div id="conversion-advanced-fields" className="conversion-inputs">
+                    {advancedFields.map((field) => (
+                      <ConversionInput
+                        key={field.id}
+                        field={field}
+                        value={inputs[field.id] || ""}
+                        onChange={updateInput}
+                      />
+                    ))}
+                  </div>
+                )}
+              </section>
+            )}
 
             {showPrompts && (
               <section className="prompt-editor">

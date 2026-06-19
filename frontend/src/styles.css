@@ -632,6 +632,35 @@ small {
   gap: 14px;
 }
 
+.conversion-advanced-inputs {
+  display: grid;
+  gap: 14px;
+  margin-top: 16px;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  padding: 12px 0;
+}
+
+.conversion-advanced-toggle {
+  width: 100%;
+  min-height: 36px;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--ink);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 700;
+  text-align: left;
+}
+
+.conversion-advanced-toggle:hover {
+  color: var(--teal);
+}
+
 .conversion-meta-stack {
   display: grid;
   grid-template-columns: 1fr;
