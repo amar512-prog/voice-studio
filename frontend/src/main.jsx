@@ -1322,6 +1322,9 @@ function GeneratePage({
   const contextOptions = isElevenLabs
     ? (config.contexts || []).map((c) => ({ id: c.id, label: c.label }))
     : (omnivoiceContexts || []).map((c) => ({ id: c.id, label: c.name }));
+  const selectedSpeechContextId = contextOptions.some((context) => context.id === ttsForm.speech_context)
+    ? ttsForm.speech_context
+    : "";
 
   // Keep speech_context valid for the active provider's context set.
   useEffect(() => {
@@ -1364,7 +1367,7 @@ function GeneratePage({
           />
         </label>
 
-        <div className="field-grid">
+        <div className="field-grid voice-field-grid">
           <label>
             {voiceSelectLabel}
             <select
@@ -1406,6 +1409,9 @@ function GeneratePage({
               />
             </label>
           )}
+        </div>
+
+        <div className="speech-context-controls">
           <label>
             Speech context
             <select
@@ -1421,6 +1427,15 @@ function GeneratePage({
                 </option>
               ))}
             </select>
+          </label>
+          <label>
+            Speech context ID
+            <input
+              value={selectedSpeechContextId}
+              readOnly
+              className="readonly-input context-id-input"
+              placeholder="Select a speech context"
+            />
           </label>
         </div>
 

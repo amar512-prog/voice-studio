@@ -1161,6 +1161,22 @@ textarea:focus {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
+.voice-field-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.speech-context-controls {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  align-items: end;
+  margin-top: 12px;
+}
+
+.context-id-input {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+}
+
 .control-row {
   display: flex;
   flex-wrap: wrap;
@@ -2073,7 +2089,8 @@ audio {
   }
 
   .field-grid,
-  .field-grid.two {
+  .field-grid.two,
+  .speech-context-controls {
     grid-template-columns: 1fr;
   }
 
