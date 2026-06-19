@@ -173,6 +173,22 @@ class FakeOmniVoice:
         }
 
 
+class FakeTextConversionClient:
+    configured = True
+
+    async def convert(self, *, system_prompt: str, user_prompt: str, max_tokens: int | None = None) -> str:
+        assert "reasoning" not in system_prompt.lower()
+        assert "Source outreach text" not in user_prompt
+        assert "Founder name: Anushua Roy" in user_prompt
+        assert max_tokens == 750
+        return (
+            "Hi Anushua Roy.\n\n"
+            "I came across Recro and thought I would send a quick note.\n\n"
+            "We work with funded Indian B-to-B founders looking at the U.S. market.\n\n"
+            "If you're curious, happy to drop more details."
+        )
+
+
 def make_batch_workbook(
     *,
     voice_id: str = "premade_us_voice",
@@ -209,6 +225,7 @@ def main() -> int:
 
         app_module.elevenlabs = FakeElevenLabs()
         app_module._clients["omnivoice"] = FakeOmniVoice()
+        app_module.text_conversion_client = FakeTextConversionClient()
         app_module.duration_service = FakeDurationService()
         fake_audio_export = FakeAudioExportService()
         app_module.audio_export_service = fake_audio_export
@@ -269,6 +286,14 @@ def main() -> int:
             assert "Check following rules in the text" in text_rules_operation["description"]
             assert "Replace slash `/` symbol" in text_rules_operation["description"]
             assert "word `slash`" in text_rules_operation["description"]
+            conversions_operation = openapi["paths"]["/api/{provider}/text-conversions"]["get"]
+            assert "inputs required by each conversion" in conversions_operation["description"]
+            convert_operation = openapi["paths"]["/api/{provider}/text-conversions/{conversion_id}/convert"]["post"]
+            convert_description = " ".join(convert_operation["description"].split())
+            assert "does not request, store, or return model reasoning" in convert_description
+            conversion_request_schema = openapi["components"]["schemas"]["OmniVoiceTextConversionRequest"]["properties"]
+            assert "Optional edited prompts" in conversion_request_schema["prompts"]["description"]
+            assert "OpenRouter max_tokens override" in conversion_request_schema["max_tokens"]["description"]
             tts_operation = openapi["paths"]["/api/{provider}/tts"]["post"]
             tts_description = " ".join(tts_operation["description"].split())
             assert "OmniVoice uses `voice_id` as a saved" in tts_description
@@ -319,6 +344,8 @@ def main() -> int:
                 "list_omnivoice_contexts_api__provider__speech_contexts_get",
                 "upsert_omnivoice_context_api__provider__speech_contexts_post",
                 "check_omnivoice_text_rules_api__provider__text_rules_check_post",
+                "list_omnivoice_text_conversions_api__provider__text_conversions_get",
+                "convert_omnivoice_text_api__provider__text_conversions__conversion_id__convert_post",
                 "delete_omnivoice_context_api__provider__speech_contexts__context_id__delete",
             }
             for operation in provider_operations:
@@ -345,6 +372,7 @@ def main() -> int:
             assert providers["default_provider"] == "omnivoice"
             assert [provider["id"] for provider in providers["providers"]] == ["omnivoice", "elevenlabs"]
             assert "text_rules" in providers["providers"][0]["capabilities"]
+            assert "text_conversions" in providers["providers"][0]["capabilities"]
             assert "voice_library" in providers["providers"][1]["capabilities"]
             call("GET", "/api/config", "/api/config")
             call("GET", "/api/auth/me", "/api/auth/me")
@@ -575,6 +603,35 @@ def main() -> int:
             ).json()
             assert not rules["ready"]
             assert rules["suggested_text"] == "A date like 15th December, 2025 needs review."
+            conversions = call(
+                "GET",
+                "/api/{provider}/text-conversions",
+                "/api/omnivoice/text-conversions",
+                headers=api_headers,
+            ).json()
+            assert conversions["conversions"][0]["id"] == "founder_linkedin_voice_note"
+            assert conversions["conversions"][0]["configured"] is True
+            assert conversions["conversions"][0]["default_max_tokens"] == app_module.settings.openrouter_max_tokens
+            converted = call(
+                "POST",
+                "/api/{provider}/text-conversions/{conversion_id}/convert",
+                "/api/omnivoice/text-conversions/founder_linkedin_voice_note/convert",
+                headers=api_headers,
+                json={
+                    "inputs": {
+                        "source_text": "Hi Anushua Roy, we're a NY-based PE/VC fund.",
+                        "founder_name": "Anushua Roy",
+                        "company_name": "Recro",
+                        "verified_observation": "",
+                        "pronunciation_notes": "",
+                    },
+                    "max_tokens": 750,
+                },
+            ).json()
+            assert converted["conversion_id"] == "founder_linkedin_voice_note"
+            assert converted["rule_check"]["ready"] is True
+            assert converted["ready_for_omnivoice"] is True
+            assert "reasoning" not in converted
 
             custom_context = call(
                 "POST",

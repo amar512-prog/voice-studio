@@ -20,6 +20,7 @@ ProviderCapability = Literal[
     "clone",
     "presets",
     "text_rules",
+    "text_conversions",
     "voice_library",
 ]
 
@@ -330,6 +331,89 @@ class OmniVoiceTextRuleResponse(BaseModel):
     suggested_text: str = Field(description="Reviewable suggestion with recognized slash patterns rewritten.")
     changes: list[OmniVoiceTextRuleChange] = Field(description="Deterministic replacements proposed by the checker.")
     errors: list[str] = Field(description="Blocking rule messages. Empty when ready is true.")
+
+
+TextConversionInputControl = Literal["text", "textarea"]
+TextConversionWarningSeverity = Literal["info", "warning", "error"]
+
+
+class OmniVoiceTextConversionInputField(BaseModel):
+    id: str = Field(description="Stable input id accepted by the conversion endpoint.")
+    label: str = Field(description="Human-readable input label.")
+    control: TextConversionInputControl = Field(description="Frontend control type.")
+    required: bool = Field(description="Whether this input is required before conversion.")
+    placeholder: str = Field(default="", description="Example or placeholder text.")
+    help: str = Field(default="", description="Short guidance shown near the input.")
+    empty_value: str = Field(default="not provided", description="Prompt value used when the input is empty.")
+
+
+class OmniVoiceTextConversionInfo(BaseModel):
+    id: str = Field(description="Stable conversion id.")
+    label: str = Field(description="Display label.")
+    purpose: str = Field(description="What this conversion is for.")
+    description: str = Field(description="Detailed operator guidance.")
+    configured: bool = Field(description="Whether the server is configured to run this conversion.")
+    model: str = Field(description="Backend model/provider label used for conversion.")
+    default_max_tokens: int = Field(description="Default OpenRouter max_tokens value for this conversion.")
+    input_fields: list[OmniVoiceTextConversionInputField] = Field(description="Inputs the frontend should collect.")
+    output_rules: list[str] = Field(description="Rules the converted text should satisfy.")
+    default_system_prompt: str = Field(description="Editable default system prompt.")
+    default_user_prompt_template: str = Field(description="Editable default user prompt template with {{field_id}} tokens.")
+
+
+class OmniVoiceTextConversionsResponse(BaseModel):
+    conversions: list[OmniVoiceTextConversionInfo] = Field(description="Available OmniVoice text conversions.")
+
+
+class OmniVoiceTextConversionPrompts(BaseModel):
+    system_prompt: str = Field(min_length=1, description="System prompt used for the conversion.")
+    user_prompt: str = Field(min_length=1, description="User prompt used for the conversion.")
+
+
+class OmniVoiceTextConversionRequest(BaseModel):
+    inputs: dict[str, str] = Field(description="Conversion inputs keyed by field id.")
+    max_tokens: int | None = Field(
+        default=None,
+        ge=256,
+        le=20000,
+        description="Optional OpenRouter max_tokens override for this conversion run.",
+    )
+    prompts: OmniVoiceTextConversionPrompts | None = Field(
+        default=None,
+        description="Optional edited prompts. Omit to let the backend compose prompts from the selected conversion.",
+    )
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "inputs": {
+                    "source_text": "Hi Anushua Roy, We're a NY-based PE/VC fund...",
+                    "founder_name": "Anushua Roy",
+                    "company_name": "Recro",
+                    "verified_observation": "",
+                    "pronunciation_notes": "",
+                },
+                "max_tokens": 5000,
+            }
+        }
+    }
+
+
+class OmniVoiceTextConversionWarning(BaseModel):
+    severity: TextConversionWarningSeverity = Field(description="Warning severity.")
+    rule: str = Field(description="Stable warning rule id.")
+    message: str = Field(description="Human-readable warning.")
+
+
+class OmniVoiceTextConversionResponse(BaseModel):
+    conversion_id: str = Field(description="Conversion id that was run.")
+    text: str = Field(description="Converted OmniVoice-ready text.")
+    prompts: OmniVoiceTextConversionPrompts = Field(description="Prompts used for the conversion.")
+    warnings: list[OmniVoiceTextConversionWarning] = Field(description="Conversion quality warnings.")
+    rule_check: OmniVoiceTextRuleResponse = Field(description="Existing OmniVoice text-rule result for converted text.")
+    ready_for_omnivoice: bool = Field(description="True when there are no conversion errors and no blocking text rules.")
+    spoken_words: int = Field(description="Estimated spoken word count.")
+    estimated_seconds: float = Field(description="Estimated duration in seconds.")
 
 
 class TtsRequest(BaseModel):

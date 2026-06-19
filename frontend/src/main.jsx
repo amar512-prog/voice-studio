@@ -8,6 +8,7 @@ import {
   ChevronRight,
   Copy,
   Download,
+  FileText,
   FileSpreadsheet,
   LogOut,
   ListChecks,
@@ -101,6 +102,7 @@ const PROVIDER_PAGE_COPY = {
   },
   omnivoice: {
     generate: "Generate from synced presets or local clones. OmniVoice presets use strict supported voice attributes.",
+    textConversion: "Convert source outreach into OmniVoice-ready spoken text before checking rules or generating.",
     rules: "Check message text for OmniVoice pronunciation problems before single or batch generation.",
     voices: "Sync curated presets, manage local clones, and keep saved voices ready for generation.",
     clone: "Store a consented sample locally for OmniVoice cloning and future reuse.",
@@ -117,6 +119,15 @@ const PAGES = [
     title: "Generate audio",
     description: "Create one reviewable voice-note file.",
     icon: Wand2
+  },
+  {
+    id: "textConversion",
+    path: "/text-conversion",
+    label: "Text Conversion",
+    title: "Text conversion",
+    description: "Convert source copy into OmniVoice-ready spoken text.",
+    icon: FileText,
+    providers: ["omnivoice"]
   },
   {
     id: "rules",
@@ -1149,6 +1160,17 @@ function App() {
             onApply={(text) => {
               setTtsForm((current) => ({ ...current, text }));
               setStatus("Suggested text applied to Generate.");
+              navigate("generate");
+            }}
+          />
+        )}
+
+        {activePage === "textConversion" && activeProvider === "omnivoice" && (
+          <TextConversionPage
+            generateText={ttsForm.text}
+            onApply={(text) => {
+              setTtsForm((current) => ({ ...current, text }));
+              setStatus("Converted text applied to Generate.");
               navigate("generate");
             }}
           />
@@ -2250,6 +2272,411 @@ function ClonePage({ activeProvider, cloneForm, setCloneForm, cloneVoice, busy, 
         busy={busy}
         accents={accents}
       />
+    </section>
+  );
+}
+
+function renderPromptTemplate(template, inputs, fields) {
+  let rendered = template || "";
+  fields.forEach((field) => {
+    const rawValue = inputs[field.id];
+    const value = rawValue && String(rawValue).trim() ? String(rawValue).trim() : field.empty_value || "not provided";
+    rendered = rendered.replaceAll(`{{${field.id}}}`, value);
+  });
+  return rendered;
+}
+
+const MIN_TEXT_CONVERSION_TOKENS = 256;
+const MAX_TEXT_CONVERSION_TOKENS = 20000;
+
+function TextConversionPage({ generateText, onApply }) {
+  const [conversions, setConversions] = useState([]);
+  const [selectedId, setSelectedId] = useState("");
+  const [inputs, setInputs] = useState({});
+  const [maxTokens, setMaxTokens] = useState("");
+  const [showPurpose, setShowPurpose] = useState(true);
+  const [showPrompts, setShowPrompts] = useState(false);
+  const [promptsEdited, setPromptsEdited] = useState(false);
+  const [promptDrafts, setPromptDrafts] = useState({ system_prompt: "", user_prompt: "" });
+  const [result, setResult] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [converting, setConverting] = useState(false);
+  const [localError, setLocalError] = useState("");
+
+  useEffect(() => {
+    let active = true;
+    setLoading(true);
+    apiJson(apiPath("omnivoice", "/text-conversions"))
+      .then((payload) => {
+        if (!active) return;
+        const available = payload.conversions || [];
+        setConversions(available);
+        setSelectedId((current) => current || available[0]?.id || "");
+        setMaxTokens((current) => current || String(available[0]?.default_max_tokens || 5000));
+      })
+      .catch((error) => {
+        if (active) setLocalError(error.message || "Could not load text conversions.");
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const selected = useMemo(
+    () => conversions.find((conversion) => conversion.id === selectedId) || conversions[0] || null,
+    [conversions, selectedId]
+  );
+  const fields = selected?.input_fields || [];
+  const sourceText = generateText || "";
+
+  useEffect(() => {
+    if (!selected) return;
+    setInputs((current) => {
+      const next = {};
+      fields.forEach((field) => {
+        next[field.id] = current[field.id] ?? (field.id === "source_text" ? sourceText : "");
+      });
+      return next;
+    });
+    setResult(null);
+    setPromptsEdited(false);
+    setMaxTokens(String(selected.default_max_tokens || 5000));
+  }, [selected?.id]);
+
+  const renderedPrompts = useMemo(() => {
+    if (!selected) return { system_prompt: "", user_prompt: "" };
+    return {
+      system_prompt: selected.default_system_prompt || "",
+      user_prompt: renderPromptTemplate(selected.default_user_prompt_template || "", inputs, fields)
+    };
+  }, [selected, inputs, fields]);
+
+  useEffect(() => {
+    if (promptsEdited) return;
+    setPromptDrafts(renderedPrompts);
+  }, [renderedPrompts.system_prompt, renderedPrompts.user_prompt, promptsEdited]);
+
+  function updateInput(id, value) {
+    setInputs((current) => ({ ...current, [id]: value }));
+    setResult(null);
+  }
+
+  function resetPrompts() {
+    setPromptsEdited(false);
+    setPromptDrafts(renderedPrompts);
+  }
+
+  async function convertText(event) {
+    event.preventDefault();
+    if (!selected) return;
+    const maxTokensNumber = Number(maxTokens);
+    if (
+      !Number.isInteger(maxTokensNumber) ||
+      maxTokensNumber < MIN_TEXT_CONVERSION_TOKENS ||
+      maxTokensNumber > MAX_TEXT_CONVERSION_TOKENS
+    ) {
+      setLocalError(`Max tokens must be between ${MIN_TEXT_CONVERSION_TOKENS} and ${MAX_TEXT_CONVERSION_TOKENS}.`);
+      return;
+    }
+    setConverting(true);
+    setLocalError("");
+    setResult(null);
+    try {
+      const body = { inputs, max_tokens: maxTokensNumber };
+      if (promptsEdited) {
+        body.prompts = promptDrafts;
+      }
+      const payload = await apiJson(apiPath("omnivoice", `/text-conversions/${encodeURIComponent(selected.id)}/convert`), {
+        method: "POST",
+        body: JSON.stringify(body)
+      });
+      setResult(payload);
+      if (!showPrompts) {
+        setPromptDrafts(payload.prompts);
+      }
+    } catch (error) {
+      setLocalError(error.message);
+    } finally {
+      setConverting(false);
+    }
+  }
+
+  const requiredMissing = fields.some((field) => field.required && !String(inputs[field.id] || "").trim());
+  const maxTokensNumber = Number(maxTokens);
+  const maxTokensInvalid =
+    !Number.isInteger(maxTokensNumber) ||
+    maxTokensNumber < MIN_TEXT_CONVERSION_TOKENS ||
+    maxTokensNumber > MAX_TEXT_CONVERSION_TOKENS;
+  const applyText =
+    result?.rule_check?.suggested_text && !result.rule_check.suggested_text.includes("/")
+      ? result.rule_check.suggested_text
+      : result?.text || "";
+  const hasRuleIssues = Boolean(result && (!result.rule_check?.ready || result.rule_check?.changes?.length));
+
+  return (
+    <section className="conversion-layout">
+      <form className="panel conversion-editor" onSubmit={convertText}>
+        <div className="panel-heading">
+          <div>
+            <h2>Convert Text</h2>
+            <p>Pick a conversion, review the prompts, then convert into OmniVoice-ready spoken copy.</p>
+          </div>
+          <FileText size={21} />
+        </div>
+
+        {loading ? (
+          <div className="empty-state compact-empty">
+            <RefreshCcw className="spin" size={24} />
+            <p>Loading conversions...</p>
+          </div>
+        ) : (
+          <>
+            <div className="conversion-meta-stack">
+              <label>
+                Conversion
+                <select
+                  value={selected?.id || ""}
+                  onChange={(event) => setSelectedId(event.target.value)}
+                >
+                  {conversions.map((conversion) => (
+                    <option key={conversion.id} value={conversion.id}>
+                      {conversion.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Status
+                <input
+                  className="readonly-input"
+                  readOnly
+                  value={selected?.configured ? `${selected.model} configured` : "OpenRouter not configured"}
+                />
+              </label>
+              <label>
+                Max tokens
+                <input
+                  type="number"
+                  min={MIN_TEXT_CONVERSION_TOKENS}
+                  max={MAX_TEXT_CONVERSION_TOKENS}
+                  step="1"
+                  value={maxTokens}
+                  onChange={(event) => {
+                    setMaxTokens(event.target.value);
+                    setResult(null);
+                  }}
+                />
+                <small className="field-help">OpenRouter max_tokens for this conversion run.</small>
+              </label>
+            </div>
+
+            <div className="rules-actions">
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={() => setShowPurpose((current) => !current)}
+              >
+                {showPurpose ? "Hide purpose" : "Show purpose"}
+              </button>
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={() => setShowPrompts((current) => !current)}
+              >
+                {showPrompts ? "Hide prompts" : "Show prompts"}
+              </button>
+            </div>
+
+            {showPurpose && selected && (
+              <div className="provider-note conversion-purpose">
+                <strong>{selected.purpose}</strong>
+                <p>{selected.description}</p>
+                <div className="conversion-rule-list">
+                  {selected.output_rules.map((rule) => (
+                    <span key={rule}>{rule}</span>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div className="conversion-inputs">
+              {fields.map((field) => (
+                <label key={field.id}>
+                  {field.label}
+                  {field.control === "textarea" ? (
+                    <textarea
+                      rows={field.id === "source_text" ? 8 : 3}
+                      value={inputs[field.id] || ""}
+                      onChange={(event) => updateInput(field.id, event.target.value)}
+                      placeholder={field.placeholder}
+                    />
+                  ) : (
+                    <input
+                      value={inputs[field.id] || ""}
+                      onChange={(event) => updateInput(field.id, event.target.value)}
+                      placeholder={field.placeholder}
+                    />
+                  )}
+                  {field.help && <small className="field-help">{field.help}</small>}
+                </label>
+              ))}
+            </div>
+
+            {showPrompts && (
+              <section className="prompt-editor">
+                <div className="panel-title-row">
+                  <div>
+                    <h2>Prompts</h2>
+                    <p>Edits apply only to this conversion run.</p>
+                  </div>
+                  <button type="button" className="secondary-button" onClick={resetPrompts}>
+                    Reset prompts
+                  </button>
+                </div>
+                <label>
+                  System prompt
+                  <textarea
+                    rows={8}
+                    value={promptDrafts.system_prompt}
+                    onChange={(event) => {
+                      setPromptsEdited(true);
+                      setPromptDrafts((current) => ({ ...current, system_prompt: event.target.value }));
+                    }}
+                  />
+                </label>
+                <label>
+                  User prompt
+                  <textarea
+                    rows={12}
+                    value={promptDrafts.user_prompt}
+                    onChange={(event) => {
+                      setPromptsEdited(true);
+                      setPromptDrafts((current) => ({ ...current, user_prompt: event.target.value }));
+                    }}
+                  />
+                </label>
+              </section>
+            )}
+
+            <div className="form-footer">
+              <span className="model-note">
+                {maxTokensInvalid
+                  ? `Max tokens must be ${MIN_TEXT_CONVERSION_TOKENS}-${MAX_TEXT_CONVERSION_TOKENS}.`
+                  : promptsEdited
+                    ? "Using edited prompts for this run."
+                    : "Using default prompts."}
+              </span>
+              <button
+                className="primary-button"
+                disabled={converting || requiredMissing || maxTokensInvalid || !selected?.configured}
+              >
+                <Wand2 size={17} />
+                {converting ? "Converting..." : "Convert text"}
+              </button>
+            </div>
+          </>
+        )}
+        {localError && <p className="login-error">{localError}</p>}
+      </form>
+
+      <section className="panel conversion-result">
+        <div className="panel-heading">
+          <div>
+            <h2>Converted Output</h2>
+            <p>Warnings and OmniVoice rule checks appear after conversion.</p>
+          </div>
+          {result?.ready_for_omnivoice ? <CheckCircle2 size={21} /> : <AlertCircle size={21} />}
+        </div>
+
+        {!result ? (
+          <div className="empty-state compact-empty">
+            <FileText size={26} />
+            <p>Converted text will appear here.</p>
+          </div>
+        ) : (
+          <div className="conversion-output-stack">
+            <div className="duration-strip">
+              <span>
+                Words
+                <strong>{result.spoken_words}</strong>
+              </span>
+              <span>
+                Estimate
+                <strong>{result.estimated_seconds}s</strong>
+              </span>
+              <span>
+                Ready
+                <strong>{result.ready_for_omnivoice ? "Yes" : "Review"}</strong>
+              </span>
+            </div>
+
+            <label>
+              Converted text
+              <textarea readOnly rows={10} value={result.text} />
+            </label>
+
+            {result.warnings.length > 0 && (
+              <div className="conversion-warning-list">
+                {result.warnings.map((warning, index) => (
+                  <div key={`${warning.rule}-${index}`} className={`conversion-warning ${warning.severity}`}>
+                    <strong>{warning.rule.replaceAll("_", " ")}</strong>
+                    <span>{warning.message}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {hasRuleIssues && (
+              <div className={`rules-result ${result.rule_check.ready ? "ready" : "blocked"}`}>
+                <div className="rules-result-heading">
+                  {result.rule_check.ready ? <CheckCircle2 size={18} /> : <AlertCircle size={18} />}
+                  <div>
+                    <h2>{result.rule_check.ready ? "Rule check passed" : "Rule check needs review"}</h2>
+                    <p>
+                      {result.rule_check.ready
+                        ? "Only non-blocking suggestions were found."
+                        : "Apply the suggested text or edit before generating audio."}
+                    </p>
+                  </div>
+                </div>
+                {result.rule_check.errors.map((message) => (
+                  <p className="rule-error" key={message}>{message}</p>
+                ))}
+                {result.rule_check.changes.length > 0 && (
+                  <div className="rule-changes">
+                    {result.rule_check.changes.map((change, index) => (
+                      <div key={`${change.rule}-${index}`}>
+                        <code>{change.original}</code>
+                        <span>becomes</span>
+                        <strong>{change.replacement}</strong>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {result.rule_check.suggested_text !== result.rule_check.original_text && (
+                  <label>
+                    Rule-check suggestion
+                    <textarea readOnly rows={6} value={result.rule_check.suggested_text} />
+                  </label>
+                )}
+              </div>
+            )}
+
+            <button
+              type="button"
+              className="primary-button"
+              disabled={!applyText || applyText.includes("/")}
+              onClick={() => onApply(applyText)}
+            >
+              <CheckCircle2 size={16} />
+              Apply to Generate
+            </button>
+          </div>
+        )}
+      </section>
     </section>
   );
 }

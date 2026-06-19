@@ -613,8 +613,115 @@ small {
   align-items: start;
 }
 
+.conversion-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(320px, 0.85fr);
+  gap: 18px;
+  align-items: start;
+}
+
+.conversion-editor,
+.conversion-result {
+  min-width: 0;
+}
+
+.conversion-inputs,
+.conversion-output-stack,
+.prompt-editor {
+  display: grid;
+  gap: 14px;
+}
+
+.conversion-meta-stack {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 14px;
+  margin-top: 12px;
+}
+
+.conversion-purpose {
+  margin-top: 14px;
+}
+
+.conversion-rule-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.conversion-rule-list span {
+  border: 1px solid #cfe0dc;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 6px 8px;
+  color: #315f59;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.field-help {
+  color: var(--muted);
+  font-weight: 500;
+  line-height: 1.45;
+}
+
+.prompt-editor {
+  margin-top: 16px;
+  border-top: 1px solid var(--border);
+  padding-top: 16px;
+}
+
+.prompt-editor h2 {
+  font-size: 15px;
+}
+
+.conversion-warning-list {
+  display: grid;
+  gap: 8px;
+}
+
+.conversion-warning {
+  display: grid;
+  gap: 4px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 13px;
+}
+
+.conversion-warning strong {
+  text-transform: capitalize;
+}
+
+.conversion-warning span {
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.conversion-warning.error {
+  border-color: #ffc9c4;
+  background: var(--red-bg);
+}
+
+.conversion-warning.error strong,
+.conversion-warning.error span {
+  color: var(--red);
+}
+
+.conversion-warning.warning {
+  border-color: #f1d58a;
+  background: var(--amber-bg);
+}
+
+.conversion-warning.warning strong,
+.conversion-warning.warning span {
+  color: var(--amber);
+}
+
 .rules-checker label,
-.rules-result label {
+.rules-result label,
+.conversion-editor label,
+.conversion-result label {
   display: grid;
   gap: 7px;
   color: var(--ink);
@@ -623,7 +730,9 @@ small {
 }
 
 .rules-checker textarea,
-.rules-result textarea {
+.rules-result textarea,
+.conversion-editor textarea,
+.conversion-result textarea {
   width: 100%;
   resize: vertical;
   border: 1px solid var(--border);
@@ -1844,6 +1953,10 @@ audio {
   .page-grid,
   .secondary-grid,
   .rules-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .conversion-layout {
     grid-template-columns: 1fr;
   }
 

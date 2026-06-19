@@ -31,6 +31,10 @@ from app.models import (
     OmniVoiceContextPreview,
     OmniVoiceContextPreviewRequest,
     OmniVoiceContextRequest,
+    OmniVoiceTextConversionRequest,
+    OmniVoiceTextConversionResponse,
+    OmniVoiceTextConversionsResponse,
+    OmniVoiceTextConversionPrompts,
     OmniVoiceTextRuleRequest,
     OmniVoiceTextRuleResponse,
     LogoutResponse,
@@ -50,6 +54,16 @@ from app.services.audio_export import AudioExportService
 from app.services.duration import DurationService
 from app.services.elevenlabs import ElevenLabsClient, ElevenLabsError
 from app.services.omnivoice import OmniVoiceClient, OmniVoiceError
+from app.services.omnivoice_text_conversions import (
+    OpenRouterTextConversionClient,
+    TextConversionError,
+    build_conversion_prompts,
+    count_spoken_words,
+    estimate_voice_note_seconds,
+    get_text_conversion,
+    list_text_conversions,
+    validate_converted_text,
+)
 from app.services.omnivoice_text_rules import (
     OmniVoiceTextRuleError,
     check_omnivoice_text,
@@ -102,7 +116,7 @@ CloneProviderPath = Annotated[
 PROVIDER_CATALOG = {
     "omnivoice": {
         "name": "OmniVoice",
-        "capabilities": ["tts", "batch", "clone", "presets", "text_rules"],
+        "capabilities": ["tts", "batch", "clone", "presets", "text_rules", "text_conversions"],
     },
     "elevenlabs": {
         "name": "ElevenLabs",
@@ -138,6 +152,7 @@ elevenlabs = _clients["elevenlabs"]
 duration_service = DurationService()
 audio_export_service = AudioExportService()
 workbooks = WorkbookService()
+text_conversion_client = OpenRouterTextConversionClient(settings)
 PROVIDER_LIBRARY_ACCENTS = {"us", "in"}
 ACCENT_LABELS = {"us": "American", "in": "Indian", "neutral": "Neutral", "auto": "Auto"}
 LANGUAGE_LABELS = {"en": "English", "eng": "English", "english": "English"}
@@ -1303,6 +1318,89 @@ def check_omnivoice_text_rules(
         suggested_text=result.suggested_text,
         changes=[change.__dict__ for change in result.changes],
         errors=list(result.errors),
+    )
+
+
+def _text_rule_response(text: str) -> OmniVoiceTextRuleResponse:
+    result = check_omnivoice_text(text)
+    return OmniVoiceTextRuleResponse(
+        ready=result.ready,
+        original_text=result.original_text,
+        suggested_text=result.suggested_text,
+        changes=[change.__dict__ for change in result.changes],
+        errors=list(result.errors),
+    )
+
+
+@app.get(
+    "/api/{provider}/text-conversions",
+    response_model=OmniVoiceTextConversionsResponse,
+    tags=["Generate"],
+    summary="List OmniVoice text conversions",
+    response_description="Available conversion templates plus required inputs and editable default prompts.",
+)
+def list_omnivoice_text_conversions(
+    provider: OmniVoiceProviderPath,
+    _user: dict = Depends(current_user),
+) -> OmniVoiceTextConversionsResponse:
+    """List OmniVoice-only text conversions and the inputs required by each conversion."""
+    _require_omnivoice(provider)
+    return OmniVoiceTextConversionsResponse(
+        conversions=list_text_conversions(
+            configured=text_conversion_client.configured,
+            model=settings.openrouter_model,
+            default_max_tokens=settings.openrouter_max_tokens,
+        )
+    )
+
+
+@app.post(
+    "/api/{provider}/text-conversions/{conversion_id}/convert",
+    response_model=OmniVoiceTextConversionResponse,
+    tags=["Generate"],
+    summary="Convert text for OmniVoice",
+    response_description="Converted text plus conversion warnings and OmniVoice text-rule results.",
+)
+async def convert_omnivoice_text(
+    provider: OmniVoiceProviderPath,
+    conversion_id: Annotated[str, ApiPath(description="Conversion id returned by GET /api/{provider}/text-conversions.")],
+    request: OmniVoiceTextConversionRequest,
+    _user: dict = Depends(current_user),
+) -> OmniVoiceTextConversionResponse:
+    """
+    Convert source text into OmniVoice-ready text using the selected conversion.
+
+    The backend does not request, store, or return model reasoning. Optional
+    edited prompts are used only for this request.
+    """
+    _require_omnivoice(provider)
+    definition = get_text_conversion(conversion_id)
+    if definition is None:
+        raise HTTPException(status_code=404, detail="Text conversion not found.")
+
+    try:
+        prompt_override = request.prompts.model_dump() if request.prompts else None
+        system_prompt, user_prompt = build_conversion_prompts(definition, request.inputs, prompt_override)
+        converted = await text_conversion_client.convert(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            max_tokens=request.max_tokens,
+        )
+    except TextConversionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    warnings = validate_converted_text(converted, request.inputs)
+    rule_check = _text_rule_response(converted)
+    ready_for_omnivoice = rule_check.ready and not any(warning.severity == "error" for warning in warnings)
+    return OmniVoiceTextConversionResponse(
+        conversion_id=definition.id,
+        text=converted,
+        prompts=OmniVoiceTextConversionPrompts(system_prompt=system_prompt, user_prompt=user_prompt),
+        warnings=[warning.__dict__ for warning in warnings],
+        rule_check=rule_check,
+        ready_for_omnivoice=ready_for_omnivoice,
+        spoken_words=count_spoken_words(converted),
+        estimated_seconds=estimate_voice_note_seconds(converted),
     )
 
 

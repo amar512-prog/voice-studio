@@ -39,7 +39,7 @@ Example:
       "id": "omnivoice",
       "name": "OmniVoice",
       "configured": true,
-      "capabilities": ["tts", "batch", "clone", "presets", "text_rules"]
+      "capabilities": ["tts", "batch", "clone", "presets", "text_rules", "text_conversions"]
     },
     {
       "id": "elevenlabs",
@@ -88,9 +88,59 @@ preprocess/postprocess). The built-in **`english_american`** and
 
 | Method | Path | Summary |
 |---|---|---|
+| GET | `/api/{provider}/text-conversions` | **OmniVoice** conversion catalog. Returns available conversions, required inputs, purpose, rules, and editable default prompts. |
+| POST | `/api/{provider}/text-conversions/{conversion_id}/convert` | **OmniVoice** text conversion. Returns converted text, prompts used, conversion warnings, and a text-rule check. |
 | POST | `/api/{provider}/text-rules/check` | **OmniVoice** text check (non-blocking). Returns suggestions. |
 | POST | `/api/{provider}/tts` | Generate one voice note (synchronous). |
 | POST | `/api/{provider}/tts/batch` | Submit an `.xlsx` batch → **202** + a job to poll. |
+
+### OmniVoice text conversions
+
+Text conversions run before generation and before the lower-level text-rules
+checker. The first available conversion is
+`founder_linkedin_voice_note`, which turns founder outreach copy into a warm
+LinkedIn voice-note script for OmniVoice.
+
+`GET /api/omnivoice/text-conversions` returns:
+
+- the conversion id and purpose
+- the input fields the frontend should collect
+- output rules
+- editable default system/user prompt templates
+- whether OpenRouter is configured
+- the server default `max_tokens` value shown in the frontend
+
+`POST /api/omnivoice/text-conversions/{conversion_id}/convert` accepts:
+
+```json
+{
+  "inputs": {
+    "source_text": "Hi Anushua Roy, We're a NY-based PE/VC fund...",
+    "founder_name": "Anushua Roy",
+    "company_name": "Recro",
+    "verified_observation": "",
+    "pronunciation_notes": ""
+  },
+  "max_tokens": 5000
+}
+```
+
+Optional edited prompts can be sent as:
+
+```json
+{
+  "inputs": { "...": "..." },
+  "max_tokens": 5000,
+  "prompts": {
+    "system_prompt": "edited system prompt",
+    "user_prompt": "edited user prompt"
+  }
+}
+```
+
+The backend does **not** request, store, or return model reasoning. The response
+contains the converted text, prompts used for that run, conversion warnings,
+estimated spoken duration, and the existing OmniVoice `text-rules/check` result.
 
 ### OmniVoice text rules
 
@@ -157,6 +207,11 @@ sent upstream in chunks of `OMNIVOICE_BATCH_CHUNK` (1–20).
 KEY=...   # your API_KEY
 
 # 1) OmniVoice: check + fix text, then generate from a design preset (no sample)
+curl -s -H "X-API-Key:$KEY" localhost:8000/api/omnivoice/text-conversions
+curl -s -H "X-API-Key:$KEY" -X POST \
+  localhost:8000/api/omnivoice/text-conversions/founder_linkedin_voice_note/convert \
+  -H 'Content-Type: application/json' \
+  -d '{"inputs":{"source_text":"Hi Anushua Roy, We are a NY-based PE/VC fund.","founder_name":"Anushua Roy","company_name":"Recro"},"max_tokens":5000}'
 curl -s -H "X-API-Key:$KEY" -X POST localhost:8000/api/omnivoice/text-rules/check \
   -H 'Content-Type: application/json' -d '{"text":"Meet on 1/2/2026."}'
 curl -s -H "X-API-Key:$KEY" -X POST localhost:8000/api/omnivoice/tts \

@@ -20,6 +20,11 @@ class Settings:
         # Rows sent to the OmniVoice space per /batch call (true batched inference).
         # Keep modest so a single ZeroGPU request stays within its time budget.
         self.omnivoice_batch_chunk = min(20, max(1, int(os.getenv("OMNIVOICE_BATCH_CHUNK", "6"))))
+        self.openrouter_api_key = os.getenv("OPENROUTER_API_KEY", "").strip()
+        self.openrouter_base_url = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1").rstrip("/")
+        self.openrouter_model = os.getenv("OPENROUTER_MODEL", "deepseek/deepseek-v4-flash")
+        self.openrouter_max_tokens = max(256, int(os.getenv("OPENROUTER_MAX_TOKENS", "5000")))
+        self.openrouter_timeout_seconds = max(15, int(os.getenv("OPENROUTER_TIMEOUT_SECONDS", "120")))
         self.max_duration_seconds = int(os.getenv("LINKEDIN_MAX_SECONDS", "60"))
         self.default_target_seconds = int(os.getenv("DEFAULT_TARGET_SECONDS", "55"))
         self.default_wpm = int(os.getenv("DEFAULT_WPM", "135"))
