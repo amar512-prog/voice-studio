@@ -1165,6 +1165,10 @@ textarea:focus {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
+.batch-selection-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 .speech-context-controls {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -2090,6 +2094,7 @@ audio {
 
   .field-grid,
   .field-grid.two,
+  .batch-selection-grid,
   .speech-context-controls {
     grid-template-columns: 1fr;
   }

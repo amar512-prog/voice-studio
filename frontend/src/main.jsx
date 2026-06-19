@@ -24,6 +24,7 @@ import {
   Wand2
 } from "lucide-react";
 import "./styles.css";
+import { buildBatchWorkbookFile, extractFirstColumnTexts } from "./workbookAdapter.js";
 
 const DEFAULT_CONTEXTS = [
   {
@@ -252,6 +253,21 @@ function voiceUseCase(voice) {
   return String(value).replaceAll("_", " ").replaceAll("-", " ");
 }
 
+function languageLabel(value) {
+  const normalized = String(value || "en").trim().toLowerCase();
+  if (!normalized || normalized === "en" || normalized === "english") return "English";
+  return normalized.replace(/^./, (character) => character.toUpperCase());
+}
+
+function voiceOptionLabel(voice, provider) {
+  if (provider !== "omnivoice") return voice.display_name;
+  if (voice.source_type !== "cloned") return voice.display_name;
+  const profile = voice.provider_metadata?.voice_message_studio_profile || {};
+  const language = languageLabel(profile.language);
+  const accent = ACCENT_LABELS[profile.accent || voice.accent] || "Auto";
+  return `${voice.display_name || "Clone"} - ${language} - ${accent}`;
+}
+
 function estimateSeconds(text, wpm) {
   const words = text.trim().split(/\s+/).filter(Boolean).length;
   if (!words) return 0;
@@ -446,6 +462,15 @@ function App() {
     wpm: 135,
     export_m4a: true
   });
+  const [batchForm, setBatchForm] = useState({
+    voice_id: "",
+    voice_name: "",
+    accent: "us",
+    speech_context: initialRoute.provider === "omnivoice" ? "english_american" : "outreach_conversational",
+    target_seconds: 55,
+    wpm: 135,
+    export_m4a: true
+  });
   const [cloneForm, setCloneForm] = useState({
     name: "",
     accent: initialRoute.provider === "omnivoice" ? "auto" : "neutral",
@@ -482,6 +507,11 @@ function App() {
         setConfig(configPayload);
         setUser(sessionPayload.user);
         setTtsForm((current) => ({
+          ...current,
+          target_seconds: configPayload.default_target_seconds,
+          wpm: configPayload.default_wpm
+        }));
+        setBatchForm((current) => ({
           ...current,
           target_seconds: configPayload.default_target_seconds,
           wpm: configPayload.default_wpm
@@ -553,6 +583,13 @@ function App() {
     setBatchResult(null);
     setJobDetail(null);
     setTtsForm((current) => ({
+      ...current,
+      voice_id: "",
+      voice_name: "",
+      accent: "us",
+      speech_context: activeProvider === "omnivoice" ? "english_american" : "outreach_conversational"
+    }));
+    setBatchForm((current) => ({
       ...current,
       voice_id: "",
       voice_name: "",
@@ -992,8 +1029,24 @@ function App() {
     setBusy("batch");
     try {
       if (!batchFile) throw new Error("Choose an .xlsx workbook first.");
+      if (!batchForm.voice_id) throw new Error("Choose a voice for this batch.");
+      if (!batchForm.speech_context) throw new Error("Choose a speech context for this batch.");
+      const selectedVoice = voices.find((voice) => voice.voice_id === batchForm.voice_id);
+      const texts = await extractFirstColumnTexts(batchFile);
+      const workbook = buildBatchWorkbookFile({
+        texts,
+        voice: {
+          voice_id: batchForm.voice_id,
+          voice_name: batchForm.voice_name || selectedVoice?.display_name || "",
+          accent: batchForm.accent || selectedVoice?.accent || "auto"
+        },
+        speechContext: batchForm.speech_context,
+        targetSeconds: Number(batchForm.target_seconds),
+        wpm: Number(batchForm.wpm),
+        exportM4a: batchForm.export_m4a
+      });
       const form = new FormData();
-      form.append("file", batchFile, batchFile.name);
+      form.append("file", workbook, workbook.name);
       // Async submit: returns 202 + a running job; then poll until terminal.
       const job = await apiJson(apiPath(activeProvider, "/tts/batch"), { method: "POST", body: form });
       setBatchResult(job);
@@ -1030,6 +1083,26 @@ function App() {
 
     const voice = voices.find((item) => item.voice_id === value);
     setTtsForm((current) => ({
+      ...current,
+      voice_id: value,
+      voice_name: voice?.display_name || current.voice_name,
+      accent: voice?.accent || current.accent,
+      speech_context: voice?.provider_metadata?.context_id || current.speech_context
+    }));
+  }
+
+  function selectBatchVoice(value) {
+    if (!value) {
+      setBatchForm((current) => ({
+        ...current,
+        voice_id: "",
+        voice_name: ""
+      }));
+      return;
+    }
+
+    const voice = voices.find((item) => item.voice_id === value);
+    setBatchForm((current) => ({
       ...current,
       voice_id: value,
       voice_name: voice?.display_name || current.voice_name,
@@ -1229,9 +1302,15 @@ function App() {
         {activePage === "batch" && (
           <BatchPage
             activeProvider={activeProvider}
+            config={config}
+            voices={voices}
+            batchForm={batchForm}
+            setBatchForm={setBatchForm}
+            selectBatchVoice={selectBatchVoice}
             batchFile={batchFile}
             setBatchFile={setBatchFile}
             uploadBatch={uploadBatch}
+            omnivoiceContexts={omnivoiceContexts}
             busy={busy}
             batchResult={batchResult}
           />
@@ -1312,19 +1391,16 @@ function GeneratePage({
   deleteContext,
   busy
 }) {
+  const isElevenLabs = activeProvider === "elevenlabs";
   const filteredVoices = useMemo(
-    () => voices.filter((voice) => voice.accent === ttsForm.accent),
-    [voices, ttsForm.accent]
+    () => (isElevenLabs ? voices.filter((voice) => voice.accent === ttsForm.accent) : voices),
+    [voices, ttsForm.accent, isElevenLabs]
   );
   const selectedVoiceVisible = filteredVoices.some((voice) => voice.voice_id === ttsForm.voice_id);
   const accentLabel = ACCENT_LABELS[ttsForm.accent] || "selected accent";
-  const isElevenLabs = activeProvider === "elevenlabs";
   const contextOptions = isElevenLabs
     ? (config.contexts || []).map((c) => ({ id: c.id, label: c.label }))
     : (omnivoiceContexts || []).map((c) => ({ id: c.id, label: c.name }));
-  const selectedSpeechContextId = contextOptions.some((context) => context.id === ttsForm.speech_context)
-    ? ttsForm.speech_context
-    : "";
 
   // Keep speech_context valid for the active provider's context set.
   useEffect(() => {
@@ -1374,44 +1450,21 @@ function GeneratePage({
               value={selectedVoiceVisible ? ttsForm.voice_id : ""}
               onChange={(event) => selectVoice(event.target.value)}
             >
-              <option value="">Choose {accentLabel} {isElevenLabs ? "voice" : "preset or sample"}</option>
+              <option value="">
+                {isElevenLabs ? `Choose ${accentLabel} voice` : "Choose voice"}
+              </option>
               {filteredVoices.length === 0 && (
                 <option value="" disabled>
-                  No {accentLabel} voices saved
+                  {isElevenLabs ? `No ${accentLabel} voices saved` : "No voices saved"}
                 </option>
               )}
               {filteredVoices.map((voice) => (
                 <option key={voice.id} value={voice.voice_id}>
-                  {voice.display_name}
+                  {voiceOptionLabel(voice, activeProvider)}
                 </option>
               ))}
             </select>
           </label>
-          {isElevenLabs ? (
-            <label>
-              Provider voice ID
-              <input
-                value={ttsForm.voice_id}
-                onChange={(event) =>
-                  setTtsForm((current) => ({ ...current, voice_id: event.target.value }))
-                }
-                placeholder="Paste voice_id"
-              />
-            </label>
-          ) : (
-            <label>
-              Selected voice ID
-              <input
-                value={ttsForm.voice_id}
-                readOnly
-                className="readonly-input"
-                placeholder="Select a design preset or saved clone"
-              />
-            </label>
-          )}
-        </div>
-
-        <div className="speech-context-controls">
           <label>
             Speech context
             <select
@@ -1427,15 +1480,6 @@ function GeneratePage({
                 </option>
               ))}
             </select>
-          </label>
-          <label>
-            Speech context ID
-            <input
-              value={selectedSpeechContextId}
-              readOnly
-              className="readonly-input context-id-input"
-              placeholder="Select a speech context"
-            />
           </label>
         </div>
 
@@ -2903,14 +2947,33 @@ function RulesPage({ text, onApply }) {
   );
 }
 
-function BatchPage({ activeProvider, batchFile, setBatchFile, uploadBatch, busy, batchResult }) {
+function BatchPage({
+  activeProvider,
+  config,
+  voices,
+  batchForm,
+  setBatchForm,
+  selectBatchVoice,
+  batchFile,
+  setBatchFile,
+  uploadBatch,
+  omnivoiceContexts,
+  busy,
+  batchResult
+}) {
   return (
     <section className="single-page">
       <BatchPanel
         activeProvider={activeProvider}
+        config={config}
+        voices={voices}
+        batchForm={batchForm}
+        setBatchForm={setBatchForm}
+        selectBatchVoice={selectBatchVoice}
         batchFile={batchFile}
         setBatchFile={setBatchFile}
         uploadBatch={uploadBatch}
+        omnivoiceContexts={omnivoiceContexts}
         busy={busy}
         batchResult={batchResult}
       />
@@ -3315,20 +3378,75 @@ function ClonePanel({ activeProvider, cloneForm, setCloneForm, cloneVoice, busy,
   );
 }
 
-function BatchPanel({ activeProvider, batchFile, setBatchFile, uploadBatch, busy, batchResult }) {
+function BatchPanel({
+  activeProvider,
+  config,
+  voices,
+  batchForm,
+  setBatchForm,
+  selectBatchVoice,
+  batchFile,
+  setBatchFile,
+  uploadBatch,
+  omnivoiceContexts,
+  busy,
+  batchResult
+}) {
+  const isElevenLabs = activeProvider === "elevenlabs";
+  const voiceOptions = isElevenLabs ? voices.filter((voice) => voice.accent === batchForm.accent) : voices;
+  const selectedVoiceVisible = voiceOptions.some((voice) => voice.voice_id === batchForm.voice_id);
+  const contextOptions = isElevenLabs
+    ? (config.contexts || []).map((context) => ({ id: context.id, label: context.label }))
+    : (omnivoiceContexts || []).map((context) => ({ id: context.id, label: context.name }));
+  const canSubmit = Boolean(batchFile && batchForm.voice_id && batchForm.speech_context);
+
   return (
     <form className="panel compact-panel" onSubmit={uploadBatch}>
       <div className="panel-heading">
         <div>
           <h2>Batch Excel</h2>
           <p>
-            Use sheet <code>tts_requests</code>.{" "}
-            {activeProvider === "elevenlabs"
-              ? "Rows should reference saved ElevenLabs voices."
-              : "Rows should reference saved RevVoice preset or clone ids."}
+            Upload an .xlsx workbook. The first sheet only needs message text in the first column.
           </p>
         </div>
         <FileSpreadsheet size={21} />
+      </div>
+      <div className="field-grid batch-selection-grid">
+        <label>
+          Voice
+          <select
+            value={selectedVoiceVisible ? batchForm.voice_id : ""}
+            onChange={(event) => selectBatchVoice(event.target.value)}
+          >
+            <option value="">Choose voice</option>
+            {voiceOptions.length === 0 && (
+              <option value="" disabled>
+                No voices saved
+              </option>
+            )}
+            {voiceOptions.map((voice) => (
+              <option key={voice.id} value={voice.voice_id}>
+                {voiceOptionLabel(voice, activeProvider)}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Speech context
+          <select
+            value={batchForm.speech_context}
+            onChange={(event) =>
+              setBatchForm((current) => ({ ...current, speech_context: event.target.value }))
+            }
+          >
+            {contextOptions.length === 0 && <option value="">No contexts</option>}
+            {contextOptions.map((context) => (
+              <option key={context.id} value={context.id}>
+                {context.label}
+              </option>
+            ))}
+          </select>
+        </label>
       </div>
       <label className="file-drop">
         <Upload size={18} />
@@ -3339,7 +3457,7 @@ function BatchPanel({ activeProvider, batchFile, setBatchFile, uploadBatch, busy
           onChange={(event) => setBatchFile(event.target.files?.[0] || null)}
         />
       </label>
-      <button className="primary-button" disabled={busy === "batch" || !batchFile}>
+      <button className="primary-button" disabled={busy === "batch" || !canSubmit}>
         <Play size={17} />
         {busy === "batch" ? "Processing..." : "Process Workbook"}
       </button>
