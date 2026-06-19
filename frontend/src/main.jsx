@@ -1225,7 +1225,6 @@ function App() {
             ttsForm={ttsForm}
             setTtsForm={setTtsForm}
             selectVoice={selectVoice}
-            changeTtsAccent={changeTtsAccent}
             estimatedSeconds={estimatedSeconds}
             result={result}
             preWarning={preWarning}
@@ -1380,7 +1379,6 @@ function GeneratePage({
   ttsForm,
   setTtsForm,
   selectVoice,
-  changeTtsAccent,
   estimatedSeconds,
   result,
   preWarning,
@@ -1483,52 +1481,12 @@ function GeneratePage({
           </label>
         </div>
 
-        <div className="control-row">
-          <SegmentedAccent
-            accents={activeProvider === "omnivoice" ? OMNIVOICE_ACCENTS : config.accents}
-            value={ttsForm.accent}
-            onChange={changeTtsAccent}
-          />
-          <label className="small-input">
-            Target sec
-            <input
-              type="number"
-              min="1"
-              max={config.max_duration_seconds}
-              value={ttsForm.target_seconds}
-              onChange={(event) =>
-                setTtsForm((current) => ({ ...current, target_seconds: event.target.value }))
-              }
-            />
-          </label>
-          <label className="small-input">
-            WPM
-            <input
-              type="number"
-              min="60"
-              max="240"
-              value={ttsForm.wpm}
-              onChange={(event) => setTtsForm((current) => ({ ...current, wpm: event.target.value }))}
-            />
-          </label>
-          <label className="toggle">
-            <input
-              type="checkbox"
-              checked={ttsForm.export_m4a}
-              onChange={(event) =>
-                setTtsForm((current) => ({ ...current, export_m4a: event.target.checked }))
-              }
-            />
-            Export M4A
-          </label>
-        </div>
-
         <WarningBanner warning={result?.warning || preWarning} />
 
         <div className="form-footer">
           <div className="estimate">
             <strong>{estimatedSeconds}s</strong>
-            <span>estimated at {ttsForm.wpm} WPM</span>
+            <span>estimated duration</span>
           </div>
           <button className="primary-button" disabled={busy === "generate" || !ttsForm.text || !ttsForm.voice_id}>
             <Play size={17} />

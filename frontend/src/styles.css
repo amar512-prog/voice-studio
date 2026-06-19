@@ -1167,6 +1167,7 @@ textarea:focus {
 
 .batch-selection-grid {
   grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin-bottom: 16px;
 }
 
 .speech-context-controls {
