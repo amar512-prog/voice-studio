@@ -76,9 +76,9 @@ const DEFAULT_PROVIDER = "omnivoice";
 const PROVIDERS = [
   {
     id: "omnivoice",
-    label: "OmniVoice",
-    shortLabel: "OV",
-    modelLabel: "OmniVoice Batch",
+    label: "RevVoice",
+    shortLabel: "RV",
+    modelLabel: "RevVoice Batch",
     subtitle: "Local presets and sample-based clones through the Hugging Face Space.",
     supportsVoiceLibrary: false,
     supportsRawVoiceId: false
@@ -105,13 +105,13 @@ const PROVIDER_PAGE_COPY = {
     history: "Review completed ElevenLabs jobs, row results, and download bundles."
   },
   omnivoice: {
-    generate: "Generate from synced presets or local clones. OmniVoice presets use strict supported voice attributes.",
-    textConversion: "Convert source outreach into OmniVoice-ready spoken text before checking rules or generating.",
-    rules: "Check message text for OmniVoice pronunciation problems before single or batch generation.",
+    generate: "Generate from synced presets or local clones. RevVoice presets use strict supported voice attributes.",
+    textConversion: "Convert source outreach into RevVoice-ready spoken text before checking rules or generating.",
+    rules: "Check message text for RevVoice pronunciation problems before single or batch generation.",
     voices: "Sync curated presets, manage local clones, and keep saved voices ready for generation.",
-    clone: "Store a consented sample locally for OmniVoice cloning and future reuse.",
-    batch: "Process workbook rows with saved OmniVoice preset or clone ids and export the results.",
-    history: "Review completed OmniVoice jobs, row results, and download bundles."
+    clone: "Store a consented sample locally for RevVoice cloning and future reuse.",
+    batch: "Process workbook rows with saved RevVoice preset or clone ids and export the results.",
+    history: "Review completed RevVoice jobs, row results, and download bundles."
   }
 };
 
@@ -129,7 +129,7 @@ const PAGES = [
     path: "/text-conversion",
     label: "Text Conversion",
     title: "Text conversion",
-    description: "Convert source copy into OmniVoice-ready spoken text.",
+    description: "Convert source copy into RevVoice-ready spoken text.",
     icon: FileText,
     providers: ["omnivoice"]
   },
@@ -138,7 +138,7 @@ const PAGES = [
     path: "/rules",
     label: "Rules",
     title: "Text readiness rules",
-    description: "Check text before OmniVoice generation.",
+    description: "Check text before RevVoice generation.",
     icon: ListChecks,
     providers: ["omnivoice"]
   },
@@ -224,7 +224,7 @@ function apiPath(provider, suffix) {
 }
 
 function modelLabel(provider, modelId) {
-  if (provider === "omnivoice") return "OmniVoice Batch";
+  if (provider === "omnivoice") return "RevVoice Batch";
   if (modelId === "eleven_v3") return "Eleven v3 Natural";
   if (modelId === "eleven_multilingual_v2") return "Multilingual v2";
   return modelId || "ElevenLabs";
@@ -894,7 +894,7 @@ function App() {
       setStatus(
         activeProvider === "elevenlabs"
           ? `Synced ${payload.length} English conversational American/Indian voice(s).`
-          : `Synced ${payload.length} OmniVoice preset voice(s).`
+          : `Synced ${payload.length} RevVoice preset voice(s).`
       );
     } catch (err) {
       setError(err.message);
@@ -1558,7 +1558,7 @@ function VoicesPage({
               <p>
                 {activeProvider === "elevenlabs"
                   ? "English, conversational, supported accents."
-                  : "Saved presets and clones available for OmniVoice generation."}
+                  : "Saved presets and clones available for RevVoice generation."}
               </p>
             </div>
             <Volume2 size={21} />
@@ -1640,7 +1640,7 @@ function OmniVoiceSamplesPanel({ voices }) {
     <section className="panel provider-options-panel">
       <div className="panel-title-row">
         <div>
-          <h2>OmniVoice Voices</h2>
+          <h2>RevVoice Voices</h2>
           <p>Accent presets use voice design; clones use uploaded or recorded samples.</p>
         </div>
         <Mic size={21} />
@@ -2176,11 +2176,11 @@ function VoiceRegistryPanel({
   return (
     <section className="panel voice-registry-panel">
       <div className="panel-title-row">
-        <h2>{activeProvider === "elevenlabs" ? "ElevenLabs Registry" : "OmniVoice Registry"}</h2>
+        <h2>{activeProvider === "elevenlabs" ? "ElevenLabs Registry" : "RevVoice Registry"}</h2>
         <button
           className="icon-button"
           onClick={syncVoices}
-          title={activeProvider === "elevenlabs" ? "Sync ElevenLabs voices" : "Sync OmniVoice presets"}
+          title={activeProvider === "elevenlabs" ? "Sync ElevenLabs voices" : "Sync RevVoice presets"}
           disabled={busy === "sync"}
         >
           <RefreshCcw className={busy === "sync" ? "spin" : ""} size={16} />
@@ -2200,7 +2200,7 @@ function VoiceRegistryPanel({
           <p className="empty">
             {activeProvider === "elevenlabs"
               ? "No voices saved yet. Sync ElevenLabs or add a voice ID."
-              : "No voices saved yet. Sync OmniVoice presets or create a clone."}
+              : "No voices saved yet. Sync RevVoice presets or create a clone."}
           </p>
         ) : (
           voices.map((voice) => {
@@ -2466,7 +2466,7 @@ function TextConversionPage({ generateText, onApply }) {
         <div className="panel-heading">
           <div>
             <h2>Convert Text</h2>
-            <p>Pick a conversion, review the prompts, then convert into OmniVoice-ready spoken copy.</p>
+            <p>Pick a conversion, review the prompts, then convert into RevVoice-ready spoken copy.</p>
           </div>
           <FileText size={21} />
         </div>
@@ -2645,7 +2645,7 @@ function TextConversionPage({ generateText, onApply }) {
         <div className="panel-heading">
           <div>
             <h2>Converted Output</h2>
-            <p>Warnings and OmniVoice rule checks appear after conversion.</p>
+            <p>Warnings and RevVoice rule checks appear after conversion.</p>
           </div>
           {result?.ready_for_omnivoice ? <CheckCircle2 size={21} /> : <AlertCircle size={21} />}
         </div>
@@ -2681,7 +2681,7 @@ function TextConversionPage({ generateText, onApply }) {
               <label>
                 LLM output before {result.wetext_processing.engine}
                 <textarea readOnly rows={8} value={result.wetext_processing.original_text} />
-                <small className="field-help">The final text above is normalized for speech, then checked for OmniVoice readiness.</small>
+                <small className="field-help">The final text above is normalized for speech, then checked for RevVoice readiness.</small>
               </label>
             )}
 
@@ -2778,7 +2778,7 @@ function RulesPage({ text, onApply }) {
         <div className="panel-heading">
           <div>
             <h2>Check Text</h2>
-            <p>Review pronunciation-sensitive slash usage before OmniVoice receives the message.</p>
+            <p>Review pronunciation-sensitive slash usage before RevVoice receives the message.</p>
           </div>
           <ListChecks size={21} />
         </div>
@@ -2843,7 +2843,7 @@ function RulesPage({ text, onApply }) {
           <div className="rules-result-heading">
             {result.ready ? <CheckCircle2 size={20} /> : <AlertCircle size={20} />}
             <div>
-              <h2>{result.ready ? "Ready for OmniVoice" : "Review required"}</h2>
+              <h2>{result.ready ? "Ready for RevVoice" : "Review required"}</h2>
               <p>
                 {result.ready
                   ? "No blocking text rules were found."
@@ -3185,7 +3185,7 @@ function ClonePanel({ activeProvider, cloneForm, setCloneForm, cloneVoice, busy,
           <p>
             {activeProvider === "elevenlabs"
               ? "Upload audio or record live. Consent is required."
-              : "Save a local source sample for OmniVoice cloning. Consent is required."}
+              : "Save a local source sample for RevVoice cloning. Consent is required."}
           </p>
         </div>
         <Mic size={21} />
@@ -3310,7 +3310,7 @@ function BatchPanel({ activeProvider, batchFile, setBatchFile, uploadBatch, busy
             Use sheet <code>tts_requests</code>.{" "}
             {activeProvider === "elevenlabs"
               ? "Rows should reference saved ElevenLabs voices."
-              : "Rows should reference saved OmniVoice preset or clone ids."}
+              : "Rows should reference saved RevVoice preset or clone ids."}
           </p>
         </div>
         <FileSpreadsheet size={21} />
