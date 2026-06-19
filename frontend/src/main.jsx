@@ -1395,10 +1395,18 @@ function GeneratePage({
     [voices, ttsForm.accent, isElevenLabs]
   );
   const selectedVoiceVisible = filteredVoices.some((voice) => voice.voice_id === ttsForm.voice_id);
+  const selectedVoice = filteredVoices.find((voice) => voice.voice_id === ttsForm.voice_id);
   const accentLabel = ACCENT_LABELS[ttsForm.accent] || "selected accent";
   const contextOptions = isElevenLabs
     ? (config.contexts || []).map((c) => ({ id: c.id, label: c.label }))
     : (omnivoiceContexts || []).map((c) => ({ id: c.id, label: c.name }));
+  const visibleContextOptions = isElevenLabs
+    ? contextOptions
+    : contextOptions.filter((context) => !OMNIVOICE_BUILTIN_CONTEXT_IDS.has(context.id));
+  const selectedContextVisible = visibleContextOptions.some(
+    (context) => context.id === ttsForm.speech_context
+  );
+  const hideSpeechContext = !isElevenLabs && selectedVoice?.source_type === "voice_design";
 
   // Keep speech_context valid for the active provider's context set.
   useEffect(() => {
@@ -1441,7 +1449,7 @@ function GeneratePage({
           />
         </label>
 
-        <div className="field-grid voice-field-grid">
+        <div className={`field-grid voice-field-grid${hideSpeechContext ? " single" : ""}`}>
           <label>
             {voiceSelectLabel}
             <select
@@ -1458,27 +1466,34 @@ function GeneratePage({
               )}
               {filteredVoices.map((voice) => (
                 <option key={voice.id} value={voice.voice_id}>
-                  {voiceOptionLabel(voice, activeProvider)}
+                  {isElevenLabs ? voiceOptionLabel(voice, activeProvider) : voice.display_name}
                 </option>
               ))}
             </select>
           </label>
-          <label>
-            Speech context
-            <select
-              value={ttsForm.speech_context}
-              onChange={(event) =>
-                setTtsForm((current) => ({ ...current, speech_context: event.target.value }))
-              }
-            >
-              {contextOptions.length === 0 && <option value="">No contexts</option>}
-              {contextOptions.map((context) => (
-                <option key={context.id} value={context.id}>
-                  {context.label}
-                </option>
-              ))}
-            </select>
-          </label>
+          {!hideSpeechContext && (
+            <label>
+              Speech context
+              <select
+                value={selectedContextVisible ? ttsForm.speech_context : ""}
+                onChange={(event) =>
+                  setTtsForm((current) => ({ ...current, speech_context: event.target.value }))
+                }
+              >
+                {!isElevenLabs && visibleContextOptions.length > 0 && (
+                  <option value="" disabled>
+                    Choose speech context
+                  </option>
+                )}
+                {visibleContextOptions.length === 0 && <option value="">No contexts</option>}
+                {visibleContextOptions.map((context) => (
+                  <option key={context.id} value={context.id}>
+                    {context.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
         </div>
 
         <WarningBanner warning={result?.warning || preWarning} />
@@ -3232,11 +3247,14 @@ function ClonePanel({ activeProvider, cloneForm, setCloneForm, cloneVoice, busy,
       </div>
       <div className="field-grid two">
         <label>
-          Voice name
+          Voice name *
           <input
             value={cloneForm.name}
             onChange={(event) => setCloneForm((current) => ({ ...current, name: event.target.value }))}
             placeholder="Amar clone"
+            required
+            pattern=".*\S.*"
+            title="Enter a clone name."
           />
         </label>
         <label>
@@ -3332,7 +3350,10 @@ function ClonePanel({ activeProvider, cloneForm, setCloneForm, cloneVoice, busy,
         />
         I have permission to clone this voice.
       </label>
-      <button className="primary-button clone-submit-button" disabled={busy === "clone" || !cloneForm.name}>
+      <button
+        className="primary-button clone-submit-button"
+        disabled={busy === "clone" || !cloneForm.name.trim()}
+      >
         <Plus size={17} />
         {busy === "clone" ? "Cloning..." : activeProvider === "omnivoice" ? "Save Clone" : "Clone and Save"}
       </button>
@@ -3357,9 +3378,17 @@ function BatchPanel({
   const isElevenLabs = activeProvider === "elevenlabs";
   const voiceOptions = isElevenLabs ? voices.filter((voice) => voice.accent === batchForm.accent) : voices;
   const selectedVoiceVisible = voiceOptions.some((voice) => voice.voice_id === batchForm.voice_id);
+  const selectedVoice = voiceOptions.find((voice) => voice.voice_id === batchForm.voice_id);
   const contextOptions = isElevenLabs
     ? (config.contexts || []).map((context) => ({ id: context.id, label: context.label }))
     : (omnivoiceContexts || []).map((context) => ({ id: context.id, label: context.name }));
+  const visibleContextOptions = isElevenLabs
+    ? contextOptions
+    : contextOptions.filter((context) => !OMNIVOICE_BUILTIN_CONTEXT_IDS.has(context.id));
+  const selectedContextVisible = visibleContextOptions.some(
+    (context) => context.id === batchForm.speech_context
+  );
+  const hideSpeechContext = !isElevenLabs && selectedVoice?.source_type === "voice_design";
   const canSubmit = Boolean(batchFile && batchForm.voice_id && batchForm.speech_context);
 
   return (
@@ -3374,7 +3403,7 @@ function BatchPanel({
         </div>
         <FileSpreadsheet size={21} />
       </div>
-      <div className="field-grid batch-selection-grid">
+      <div className={`field-grid batch-selection-grid${hideSpeechContext ? " single" : ""}`}>
         <label>
           Voice
           <select
@@ -3389,27 +3418,34 @@ function BatchPanel({
             )}
             {voiceOptions.map((voice) => (
               <option key={voice.id} value={voice.voice_id}>
-                {voiceOptionLabel(voice, activeProvider)}
+                {isElevenLabs ? voiceOptionLabel(voice, activeProvider) : voice.display_name}
               </option>
             ))}
           </select>
         </label>
-        <label>
-          Speech context
-          <select
-            value={batchForm.speech_context}
-            onChange={(event) =>
-              setBatchForm((current) => ({ ...current, speech_context: event.target.value }))
-            }
-          >
-            {contextOptions.length === 0 && <option value="">No contexts</option>}
-            {contextOptions.map((context) => (
-              <option key={context.id} value={context.id}>
-                {context.label}
-              </option>
-            ))}
-          </select>
-        </label>
+        {!hideSpeechContext && (
+          <label>
+            Speech context
+            <select
+              value={selectedContextVisible ? batchForm.speech_context : ""}
+              onChange={(event) =>
+                setBatchForm((current) => ({ ...current, speech_context: event.target.value }))
+              }
+            >
+              {!isElevenLabs && visibleContextOptions.length > 0 && (
+                <option value="" disabled>
+                  Choose speech context
+                </option>
+              )}
+              {visibleContextOptions.length === 0 && <option value="">No contexts</option>}
+              {visibleContextOptions.map((context) => (
+                <option key={context.id} value={context.id}>
+                  {context.label}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
       </div>
       <label className="file-drop">
         <Upload size={18} />
