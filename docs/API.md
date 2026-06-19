@@ -62,7 +62,7 @@ Example:
 | DELETE | `/api/{provider}/voices/{record_id}` | both | Delete a saved voice. |
 | GET | `/api/{provider}/voices/{record_id}/preview` | both | 307-redirect to a preview clip (best-effort). |
 | POST | `/api/{provider}/voices/sync` | both | ElevenLabs: pull eligible workspace voices. OmniVoice: seed/refresh the design presets. |
-| POST | `/api/{provider}/voices/clone` | both | Multipart upload of a consented sample. ElevenLabs clones server-side; OmniVoice stores the sample locally (optional `reference_text`). |
+| POST | `/api/{provider}/voices/clone` | both | Multipart upload of a consented sample. ElevenLabs clones server-side; OmniVoice stores a local normalized reference WAV, selecting the best-scored continuous 3-10s pause-bounded clip when available, otherwise the shortest pause/source-bounded clip (optional `reference_text`). |
 | GET | `/api/{provider}/voices/options` | **elevenlabs** | Browse the ElevenLabs library/premade (paged/sorted/accent-filtered). 404 for OmniVoice. |
 | POST | `/api/{provider}/voice-options/{voice_id}/save` | **elevenlabs** | Save a picked library/premade voice. |
 | POST | `/api/{provider}/voices/by-id` | **elevenlabs** | Register a raw ElevenLabs voice id. |
@@ -100,6 +100,20 @@ Text conversions run before generation and before the lower-level text-rules
 checker. The first available conversion is
 `founder_linkedin_voice_note`, which turns founder outreach copy into a warm
 LinkedIn voice-note script for OmniVoice.
+
+The original natural-language `source_text` and context fields are sent to the
+LLM unchanged. After conversion, the backend normalizes the LLM output with
+WeTextProcessing English TN. Conversion warnings and the OmniVoice text-rules
+check run against that final speech-ready text.
+
+Known TTS-safe tokens produced by the LLM, including `U-S`, `U.S.`, `P-E V-C`,
+`G-T-M`, `C-R-O`, `C-M-O`, `B-to-B`, and bracketed CMU phonemes, are preserved
+during WeTextProcessing. Raw forms such as `US` remain visible to the conversion
+validator instead of being silently corrected.
+
+WeTextProcessing uses Pynini. The Compose image defaults to `linux/amd64`
+because Pynini publishes Linux Python 3.12 wheels for x86_64; this is native on
+server 1 and runs through Docker emulation on Apple Silicon development hosts.
 
 `GET /api/omnivoice/text-conversions` returns:
 
@@ -139,8 +153,10 @@ Optional edited prompts can be sent as:
 ```
 
 The backend does **not** request, store, or return model reasoning. The response
-contains the converted text, prompts used for that run, conversion warnings,
-estimated spoken duration, and the existing OmniVoice `text-rules/check` result.
+contains the natural-language LLM output, its WeTextProcessing-normalized final
+text, prompts used for that run, conversion warnings, estimated spoken duration,
+and the existing OmniVoice `text-rules/check` result. WeTextProcessing details
+are returned under the explicit `wetext_processing` field.
 
 ### OmniVoice text rules
 

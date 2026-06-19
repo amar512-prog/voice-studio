@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import re
+from threading import Lock
 from typing import Any
 
 import httpx
@@ -25,12 +26,28 @@ Core rules:
 - Remove marketing language.
 - Use contractions wherever natural.
 - Break long sentences into short lines and short paragraphs.
-- Add natural emphasis pauses using "..." after the founder name, company name, compliment, and value proposition.
+- Add natural emphasis pauses using "..." after supplied names, observations, or value propositions when present.
+Rewrite for text-to-speech.
+
+Rules:
+- Preserve wording.
+- Add punctuation for natural speech.
+- Use commas for short pauses.
+- Use semicolons for medium pauses.
+- Use periods for sentence breaks.
+- Use ellipses only for emphasis.
+- Do not change meaning.
+- Use line breaks only for readability. Do not rely on \\n or \\n\\n to create an audible pause; use punctuation for pacing.
 - Never claim the founder is selected, shortlisted, qualified, or a strong fit.
 - Never fabricate company facts, traction, contact details, pain points, or personalization.
+- Only delete, shorten, normalize, or rephrase supplied statements.
+- Never add inferred benefits, outcomes, suitability claims, or persuasive conclusions.
+- Use a value proposition only when one is explicitly present in the source text.
+- Do not add phrases beginning with "We believe", "This could", or "This would".
+- Remove redundant audience references such as "for your company" when the sentence remains clear without them.
 - If no verified observation is provided, keep personalization neutral.
 - End with a gentle information CTA, preferably: If you're curious, happy to drop more details.
-- Convert abbreviations for pronunciation: US -> U.S.; PE/VC -> P-E V-C; GTM -> G-T-M; CRO -> C-R-O; CMO -> C-M-O; B2B -> B-to-B; NY -> New York.
+- Convert abbreviations for pronunciation: US -> U-S; PE/VC -> P-E V-C; GTM -> G-T-M; CRO -> C-R-O; CMO -> C-M-O; B2B -> B-to-B; NY -> New York.
 - Avoid slashes because OmniVoice may read "/" as "slash".
 - Use bracketed CMU-style phoneme overrides only for high-risk founder, company, product, or brand names when a pronunciation is supplied.
 """
@@ -43,18 +60,35 @@ Cut anything that does not directly improve reply probability.
 
 Remove marketing language:
 Instead of: Transformative, Groundbreaking, Innovative, World-class, cutting-edge
-Use: Practical, Hands-on, Real, Direct
+Use plain spoken wording already supported by the source text.
 
 Replace formal writing with spoken English.
 Use contractions everywhere.
 Break long sentences.
-Use "..." for natural emphasis pauses after the founder name, company name, compliment, and value proposition.
+Use "..." for natural emphasis pauses after supplied names, observations, or value propositions when present.
+Rewrite for text-to-speech.
+
+Rules:
+- Preserve wording.
+- Add punctuation for natural speech.
+- Use commas for short pauses.
+- Use semicolons for medium pauses.
+- Use periods for sentence breaks.
+- Use ellipses only for emphasis.
+- Do not change meaning.
+Use line breaks only for readability.
+Do not rely on \\n or \\n\\n to create an audible pause; use punctuation for pacing.
+Only delete, shorten, normalize, or rephrase supplied statements.
+Never add inferred benefits, outcomes, suitability claims, or persuasive conclusions.
+Use a value proposition only when one is explicitly present in the source text.
+Do not add phrases beginning with "We believe", "This could", or "This would".
+Remove redundant audience references such as "for your company" when the sentence remains clear without them.
 End with a gentle information CTA.
 Preferred CTA:
 If you're curious, happy to drop more details.
 
 Normalize abbreviations for TTS:
-US -> U.S.
+US -> U-S
 PE/VC -> P-E V-C
 GTM -> G-T-M
 CRO -> C-R-O
@@ -94,8 +128,15 @@ FORMAL_OR_SELECTION_PHRASES = {
     "great match",
 }
 
+INFERRED_BENEFIT_PHRASES = {
+    "we believe",
+    "this could",
+    "this would",
+    "accelerate your",
+}
+
 UNEXPANDED_ABBREVIATIONS = {
-    "US": "Use U.S.",
+    "US": "Use U-S.",
     "PE/VC": "Use P-E V-C.",
     "GTM": "Use G-T-M or go-to-market.",
     "CRO": "Use C-R-O.",
@@ -103,6 +144,21 @@ UNEXPANDED_ABBREVIATIONS = {
     "B2B": "Use B-to-B.",
     "NY": "Use New York.",
 }
+
+WETEXT_PROTECTED_TTS_TOKENS = (
+    "U-S",
+    "U.S.",
+    "P-E V-C",
+    "G-T-M",
+    "C-R-O",
+    "C-M-O",
+    "B-to-B",
+)
+WETEXT_PROTECTED_PATTERN = re.compile(
+    "("
+    + "|".join(re.escape(token) for token in WETEXT_PROTECTED_TTS_TOKENS)
+    + r"|\[[A-Z0-9 ]+\])"
+)
 
 CONTRACTION_MISSES = {
     "we are": "Use we're.",
@@ -153,6 +209,17 @@ class ConversionWarning:
     severity: str
     rule: str
     message: str
+
+
+@dataclass(frozen=True)
+class WeTextProcessingResult:
+    engine: str
+    original_text: str
+    text: str
+
+    @property
+    def changed(self) -> bool:
+        return self.original_text != self.text
 
 
 class TextConversionError(RuntimeError):
@@ -216,8 +283,9 @@ TEXT_CONVERSIONS = (
         output_rules=(
             "Under 60 seconds, usually 90-120 spoken words.",
             "No fabricated facts, pain points, traction, or personalization.",
+            "No inferred benefits, outcomes, suitability claims, or persuasive conclusions.",
             "No selection language such as strong fit, shortlisted, selected, or qualified.",
-            'Use "..." for natural emphasis pauses after the founder name, company name, compliment, and value proposition.',
+            'Use "..." for natural emphasis pauses after supplied names, observations, or value propositions.',
             "Normalize TTS-risky abbreviations such as PE/VC, B2B, GTM, CMO, CRO, US, and NY.",
             "End with a gentle information CTA.",
         ),
@@ -248,6 +316,72 @@ def list_text_conversions(*, configured: bool, model: str, default_max_tokens: i
 
 def get_text_conversion(conversion_id: str) -> TextConversionDefinition | None:
     return next((definition for definition in TEXT_CONVERSIONS if definition.id == conversion_id), None)
+
+
+class WeTextEnglishProcessor:
+    def __init__(self) -> None:
+        self._normalizer: Any | None = None
+        self._lock = Lock()
+
+    def normalize(self, text: str) -> str:
+        with self._lock:
+            if self._normalizer is None:
+                try:
+                    from tn.english.normalizer import Normalizer as EnglishNormalizer
+                except ImportError as exc:
+                    raise TextConversionError(
+                        "WeTextProcessing is not installed; speech-readiness processing is unavailable."
+                    ) from exc
+                self._normalizer = EnglishNormalizer(overwrite_cache=False)
+
+            try:
+                parts = re.split(r"(\r?\n+)", text)
+                normalized = "".join(
+                    part
+                    if re.fullmatch(r"\r?\n+", part)
+                    else self._normalize_line(part)
+                    for part in parts
+                    if part
+                ).strip()
+            except Exception as exc:
+                raise TextConversionError(f"WeTextProcessing failed to normalize converted text: {exc!s}") from exc
+
+        if not normalized:
+            raise TextConversionError("WeTextProcessing returned empty converted text.")
+        return normalized
+
+    def _normalize_line(self, text: str) -> str:
+        parts = WETEXT_PROTECTED_PATTERN.split(text)
+        return "".join(
+            part if WETEXT_PROTECTED_PATTERN.fullmatch(part) else self._normalize_unprotected(part)
+            for part in parts
+            if part
+        )
+
+    def _normalize_unprotected(self, text: str) -> str:
+        leading = re.match(r"^\s*", text).group()
+        trailing = re.search(r"\s*$", text).group()
+        core_end = len(text) - len(trailing) if trailing else len(text)
+        core = text[len(leading):core_end]
+        if not core:
+            return text
+        return f"{leading}{str(self._normalizer.normalize(core)).strip()}{trailing}"
+
+
+def apply_wetext_processing(
+    text: str,
+    normalize: Any,
+) -> WeTextProcessingResult:
+    original_text = text.strip()
+    normalized_text = str(normalize(original_text)).strip()
+    if not normalized_text:
+        raise TextConversionError("WeTextProcessing returned empty converted text.")
+
+    return WeTextProcessingResult(
+        engine="WeTextProcessing English TN",
+        original_text=original_text,
+        text=normalized_text,
+    )
 
 
 def build_conversion_prompts(
@@ -340,6 +474,16 @@ def validate_converted_text(text: str, inputs: dict[str, str]) -> list[Conversio
     for phrase in sorted(FORMAL_OR_SELECTION_PHRASES):
         if phrase in lowered:
             warnings.append(ConversionWarning("warning", "salesy_or_selection_language", f"Review phrase: {phrase}."))
+
+    for phrase in sorted(INFERRED_BENEFIT_PHRASES):
+        if phrase in lowered:
+            warnings.append(
+                ConversionWarning(
+                    "warning",
+                    "inferred_benefit",
+                    f"Review possible inferred benefit or persuasive conclusion: {phrase}.",
+                )
+            )
 
     for abbreviation, fix in UNEXPANDED_ABBREVIATIONS.items():
         if re.search(rf"(?<![A-Z-]){re.escape(abbreviation)}(?![A-Z-])", stripped):

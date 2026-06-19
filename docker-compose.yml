@@ -1,5 +1,6 @@
 services:
   app:
+    platform: "${DOCKER_PLATFORM:-linux/amd64}"
     build: .
     image: voice-message-studio
     container_name: voice-message-studio-app

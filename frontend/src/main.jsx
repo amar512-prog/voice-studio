@@ -68,6 +68,10 @@ const PROVIDER_SORTS = [
   { id: "most_users", label: "Most users" },
   { id: "characters", label: "Characters" }
 ];
+
+const VOICE_CLONE_READ_ALOUD_SCRIPT =
+  "I am recording this voice sample with my permission, so it can be used to create a voice clone in Voice Message Studio. I am speaking in my normal voice, at a steady pace, with clear words and natural pauses. A good voice note should feel warm, direct, and easy to understand. Today I want the sample to capture how I sound in a calm conversation, not a performance. I will pause here... then continue softly. Numbers like twenty-four, forty-seven, and two thousand twenty-six should sound clear. If you are listening back, check for background noise, echo, clipped words, and sudden volume changes. Thanks, that is the sample.";
+
 const DEFAULT_PROVIDER = "omnivoice";
 const PROVIDERS = [
   {
@@ -964,7 +968,14 @@ function App() {
         consent_confirmed: false,
         sample: null
       });
-      setStatus(`Cloned and persisted ${saved.display_name}.`);
+      const referenceClip = saved.provider_metadata?.reference_clip;
+      const referenceStatus =
+        activeProvider === "omnivoice" && referenceClip?.selected_duration_seconds
+          ? ` Reference clip: ${referenceClip.selected_duration_seconds}s${
+              referenceClip.trimmed ? " selected from clear pauses." : " saved without trimming."
+            }`
+          : "";
+      setStatus(`Cloned and persisted ${saved.display_name}.${referenceStatus}`);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -2294,7 +2305,7 @@ function TextConversionPage({ generateText, onApply }) {
   const [selectedId, setSelectedId] = useState("");
   const [inputs, setInputs] = useState({});
   const [maxTokens, setMaxTokens] = useState("");
-  const [showPurpose, setShowPurpose] = useState(true);
+  const [showPurpose, setShowPurpose] = useState(false);
   const [showPrompts, setShowPrompts] = useState(false);
   const [promptsEdited, setPromptsEdited] = useState(false);
   const [promptDrafts, setPromptDrafts] = useState({ system_prompt: "", user_prompt: "" });
@@ -2614,9 +2625,17 @@ function TextConversionPage({ generateText, onApply }) {
             </div>
 
             <label>
-              Converted text
+              TTS-ready text
               <textarea readOnly rows={10} value={result.text} />
             </label>
+
+            {result.wetext_processing?.changed && (
+              <label>
+                LLM output before {result.wetext_processing.engine}
+                <textarea readOnly rows={8} value={result.wetext_processing.original_text} />
+                <small className="field-help">The final text above is normalized for speech, then checked for OmniVoice readiness.</small>
+              </label>
+            )}
 
             {result.warnings.length > 0 && (
               <div className="conversion-warning-list">
@@ -3104,7 +3123,9 @@ function ClonePanel({ activeProvider, cloneForm, setCloneForm, cloneVoice, busy,
   }
 
   function stopRecording() {
-    recorderRef.current?.stop();
+    if (recorderRef.current && recorderRef.current.state !== "inactive") {
+      recorderRef.current.stop();
+    }
     setRecording(false);
   }
 
@@ -3144,6 +3165,35 @@ function ClonePanel({ activeProvider, cloneForm, setCloneForm, cloneVoice, busy,
           </select>
         </label>
       </div>
+      <section className="read-aloud-card">
+        <div className="panel-title-row">
+          <div>
+            <h2>Read Aloud Sample</h2>
+            <p>Record this in one steady take, in the same voice and accent you want cloned.</p>
+          </div>
+          {activeProvider === "omnivoice" && (
+            <button
+              type="button"
+              className="secondary-button"
+              onClick={() =>
+                setCloneForm((current) => ({ ...current, reference_text: VOICE_CLONE_READ_ALOUD_SCRIPT }))
+              }
+            >
+              <Copy size={15} />
+              Use as transcript
+            </button>
+          )}
+        </div>
+        <p className="read-aloud-script">{VOICE_CLONE_READ_ALOUD_SCRIPT}</p>
+        <div className="read-aloud-tips">
+          <span>Quiet room</span>
+          <span>Use a 3-10 second reference audio clip</span>
+          <span>Longer audio can slow inference and degrade clone quality</span>
+          <span>Same distance from mic</span>
+          <span>No music or denoise</span>
+          <span>One consistent tone</span>
+        </div>
+      </section>
       <label>
         Description
         <input

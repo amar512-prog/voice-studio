@@ -21,6 +21,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from app.services.audio_export import ReferenceClipResult
+
 
 def configure_environment(data_dir: str) -> None:
     os.environ.update(
@@ -145,10 +147,35 @@ class FakeDurationService:
 class FakeAudioExportService:
     def __init__(self) -> None:
         self.wav_calls: list[tuple[Path, Path]] = []
+        self.reference_calls: list[tuple[Path, Path]] = []
 
     def export_wav(self, input_audio: Path, output_wav: Path) -> None:
         self.wav_calls.append((input_audio, output_wav))
         output_wav.write_bytes(input_audio.read_bytes())
+
+    def export_reference_wav(self, input_audio: Path, output_wav: Path) -> ReferenceClipResult:
+        self.reference_calls.append((input_audio, output_wav))
+        self.export_wav(input_audio, output_wav)
+        return ReferenceClipResult(
+            source_duration_seconds=12.4,
+            selected_start_seconds=1.2,
+            selected_end_seconds=8.8,
+            selected_duration_seconds=7.6,
+            trimmed=True,
+            selection_mode="pause_bounded",
+            detected_silence_count=2,
+            silence_threshold_db=-35,
+            min_pause_seconds=0.25,
+            boundary_padding_seconds=0.2,
+            score=0.86,
+            score_breakdown={
+                "overall": 0.86,
+                "fluency": 0.9,
+                "human_like": 0.84,
+                "emotional_expression": 0.8,
+            },
+            candidate_count=3,
+        )
 
     def export_mp3(self, input_wav: Path, output_mp3: Path) -> None:
         output_mp3.write_bytes(b"fake-mp3-bytes")
@@ -180,13 +207,19 @@ class FakeTextConversionClient:
         assert "reasoning" not in system_prompt.lower()
         assert "Source outreach text" not in user_prompt
         assert "Founder name: Anushua Roy" in user_prompt
+        assert "NY-based PE/VC fund" in user_prompt
         assert max_tokens == 750
         return (
             "Hi Anushua Roy.\n\n"
             "I came across Recro and thought I would send a quick note.\n\n"
-            "We work with funded Indian B-to-B founders looking at the U.S. market.\n\n"
+            "We work with 25 funded Indian B-to-B founders looking at the U.S. market.\n\n"
             "If you're curious, happy to drop more details."
         )
+
+
+class FakeWeTextProcessor:
+    def normalize(self, text: str) -> str:
+        return text.replace("25 funded", "twenty five funded")
 
 
 def make_batch_workbook(
@@ -226,6 +259,7 @@ def main() -> int:
         app_module.elevenlabs = FakeElevenLabs()
         app_module._clients["omnivoice"] = FakeOmniVoice()
         app_module.text_conversion_client = FakeTextConversionClient()
+        app_module.wetext_processor = FakeWeTextProcessor()
         app_module.duration_service = FakeDurationService()
         fake_audio_export = FakeAudioExportService()
         app_module.audio_export_service = fake_audio_export
@@ -277,6 +311,10 @@ def main() -> int:
                 if parameter["name"] == "provider"
             )
             assert "local reference-audio cloning" in clone_provider_parameter["description"]
+            clone_description = " ".join(clone_operation["description"].split())
+            assert "best-scored 3-10 second pause-bounded clip when available" in clone_description
+            assert "fluency, human-like delivery, and natural expression" in clone_description
+            assert "otherwise the shortest pause/source-bounded clip" in clone_description
             clone_body_ref = clone_operation["requestBody"]["content"]["multipart/form-data"]["schema"]["$ref"]
             clone_body_schema = openapi["components"]["schemas"][clone_body_ref.rsplit("/", 1)[-1]]
             assert "OmniVoice accepts `us`" in clone_body_schema["properties"]["accent"]["description"]
@@ -290,10 +328,14 @@ def main() -> int:
             assert "inputs required by each conversion" in conversions_operation["description"]
             convert_operation = openapi["paths"]["/api/{provider}/text-conversions/{conversion_id}/convert"]["post"]
             convert_description = " ".join(convert_operation["description"].split())
+            assert "original natural-language source is sent to OpenRouter" in convert_description
+            assert "before conversion warnings and OmniVoice text-rule verification" in convert_description
             assert "does not request, store, or return model reasoning" in convert_description
             conversion_request_schema = openapi["components"]["schemas"]["OmniVoiceTextConversionRequest"]["properties"]
             assert "Optional edited prompts" in conversion_request_schema["prompts"]["description"]
             assert "OpenRouter max_tokens override" in conversion_request_schema["max_tokens"]["description"]
+            conversion_response_schema = openapi["components"]["schemas"]["OmniVoiceTextConversionResponse"]["properties"]
+            assert "WeTextProcessing result" in conversion_response_schema["wetext_processing"]["description"]
             tts_operation = openapi["paths"]["/api/{provider}/tts"]["post"]
             tts_description = " ".join(tts_operation["description"].split())
             assert "OmniVoice uses `voice_id` as a saved" in tts_description
@@ -629,6 +671,24 @@ def main() -> int:
                 },
             ).json()
             assert converted["conversion_id"] == "founder_linkedin_voice_note"
+            assert converted["wetext_processing"] == {
+                "engine": "WeTextProcessing English TN",
+                "changed": True,
+                "original_text": (
+                    "Hi Anushua Roy.\n\n"
+                    "I came across Recro and thought I would send a quick note.\n\n"
+                    "We work with 25 funded Indian B-to-B founders looking at the U.S. market.\n\n"
+                    "If you're curious, happy to drop more details."
+                ),
+                "text": (
+                    "Hi Anushua Roy.\n\n"
+                    "I came across Recro and thought I would send a quick note.\n\n"
+                    "We work with twenty five funded Indian B-to-B founders looking at the U.S. market.\n\n"
+                    "If you're curious, happy to drop more details."
+                ),
+            }
+            assert "NY-based PE/VC fund" in converted["prompts"]["user_prompt"]
+            assert converted["text"] == converted["wetext_processing"]["text"]
             assert converted["rule_check"]["ready"] is True
             assert converted["ready_for_omnivoice"] is True
             assert "reasoning" not in converted
@@ -680,8 +740,14 @@ def main() -> int:
                 files={"sample": ("sample.wav", b"sample-audio", "audio/wav")},
             ).json()
             assert cloned_omnivoice["provider_metadata"]["reference_text"] == "This is the reference transcript."
+            assert cloned_omnivoice["provider_metadata"]["reference_clip"]["selection_mode"] == "pause_bounded"
+            assert cloned_omnivoice["provider_metadata"]["reference_clip"]["trimmed"] is True
+            assert cloned_omnivoice["provider_metadata"]["reference_clip"]["selected_duration_seconds"] == 7.6
+            assert cloned_omnivoice["provider_metadata"]["reference_clip"]["score"] == 0.86
+            assert cloned_omnivoice["provider_metadata"]["reference_clip"]["score_breakdown"]["fluency"] == 0.9
+            assert cloned_omnivoice["provider_metadata"]["reference_clip"]["candidate_count"] == 3
             assert cloned_omnivoice["accent"] == "auto"
-            clone_input, clone_output = fake_audio_export.wav_calls[-1]
+            clone_input, clone_output = fake_audio_export.reference_calls[-1]
             assert clone_input.name.endswith(".wav")
             assert clone_output != clone_input
             assert clone_output.name.endswith("-normalized.wav")

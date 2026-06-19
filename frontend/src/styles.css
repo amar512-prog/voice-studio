@@ -1368,6 +1368,48 @@ audio {
   text-overflow: ellipsis;
 }
 
+.read-aloud-card {
+  display: grid;
+  gap: 12px;
+  margin: 14px 0;
+  padding: 14px;
+  border: 1px solid #cfe0dc;
+  border-radius: 8px;
+  background: #f6fbfa;
+}
+
+.read-aloud-card h2 {
+  font-size: 15px;
+}
+
+.read-aloud-card .secondary-button {
+  white-space: nowrap;
+}
+
+.read-aloud-script {
+  margin: 0;
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 650;
+  line-height: 1.65;
+}
+
+.read-aloud-tips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.read-aloud-tips span {
+  border: 1px solid #cfe0dc;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #315f59;
+  padding: 6px 8px;
+  font-size: 12px;
+  font-weight: 750;
+}
+
 .file-drop {
   min-height: 84px;
   border: 1px dashed #aeb8c2;

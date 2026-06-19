@@ -35,6 +35,7 @@ from app.models import (
     OmniVoiceTextConversionResponse,
     OmniVoiceTextConversionsResponse,
     OmniVoiceTextConversionPrompts,
+    OmniVoiceWeTextProcessing,
     OmniVoiceTextRuleRequest,
     OmniVoiceTextRuleResponse,
     LogoutResponse,
@@ -50,13 +51,15 @@ from app.models import (
     VoiceRecord,
     WarningState,
 )
-from app.services.audio_export import AudioExportService
+from app.services.audio_export import AudioExportService, ReferenceClipSelectionError
 from app.services.duration import DurationService
 from app.services.elevenlabs import ElevenLabsClient, ElevenLabsError
 from app.services.omnivoice import OmniVoiceClient, OmniVoiceError
 from app.services.omnivoice_text_conversions import (
     OpenRouterTextConversionClient,
     TextConversionError,
+    WeTextEnglishProcessor,
+    apply_wetext_processing,
     build_conversion_prompts,
     count_spoken_words,
     estimate_voice_note_seconds,
@@ -153,6 +156,7 @@ duration_service = DurationService()
 audio_export_service = AudioExportService()
 workbooks = WorkbookService()
 text_conversion_client = OpenRouterTextConversionClient(settings)
+wetext_processor = WeTextEnglishProcessor()
 PROVIDER_LIBRARY_ACCENTS = {"us", "in"}
 ACCENT_LABELS = {"us": "American", "in": "Indian", "neutral": "Neutral", "auto": "Auto"}
 LANGUAGE_LABELS = {"en": "English", "eng": "English", "english": "English"}
@@ -1370,6 +1374,10 @@ async def convert_omnivoice_text(
     """
     Convert source text into OmniVoice-ready text using the selected conversion.
 
+    The original natural-language source is sent to OpenRouter. The LLM output
+    is then normalized with WeTextProcessing English TN before conversion
+    warnings and OmniVoice text-rule verification run.
+
     The backend does not request, store, or return model reasoning. Optional
     edited prompts are used only for this request.
     """
@@ -1381,20 +1389,32 @@ async def convert_omnivoice_text(
     try:
         prompt_override = request.prompts.model_dump() if request.prompts else None
         system_prompt, user_prompt = build_conversion_prompts(definition, request.inputs, prompt_override)
-        converted = await text_conversion_client.convert(
+        llm_text = await text_conversion_client.convert(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             max_tokens=request.max_tokens,
         )
+        wetext_processing = await asyncio.to_thread(
+            apply_wetext_processing,
+            llm_text,
+            wetext_processor.normalize,
+        )
     except TextConversionError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    converted = wetext_processing.text
     warnings = validate_converted_text(converted, request.inputs)
     rule_check = _text_rule_response(converted)
     ready_for_omnivoice = rule_check.ready and not any(warning.severity == "error" for warning in warnings)
     return OmniVoiceTextConversionResponse(
         conversion_id=definition.id,
         text=converted,
+        wetext_processing=OmniVoiceWeTextProcessing(
+            engine=wetext_processing.engine,
+            changed=wetext_processing.changed,
+            original_text=wetext_processing.original_text,
+            text=wetext_processing.text,
+        ),
         prompts=OmniVoiceTextConversionPrompts(system_prompt=system_prompt, user_prompt=user_prompt),
         warnings=[warning.__dict__ for warning in warnings],
         rule_check=rule_check,
@@ -1544,9 +1564,13 @@ async def clone_voice(
     """
     Clone a voice through OmniVoice or ElevenLabs and persist it locally.
 
-    OmniVoice stores a normalized reference WAV locally. ElevenLabs uploads the
-    sample for instant voice cloning. Both paths require explicit consent, and
-    the uploaded sample is retained under the app data directory for auditability.
+    OmniVoice stores a normalized reference WAV locally. Longer OmniVoice
+    recordings are analyzed as a whole and trimmed only to one continuous
+    section: the best-scored 3-10 second pause-bounded clip when available
+    (fluency, human-like delivery, and natural expression), otherwise the
+    shortest pause/source-bounded clip. ElevenLabs uploads the sample for
+    instant voice cloning. Both paths require explicit consent, and the uploaded
+    sample is retained under the app data directory for auditability.
     """
     provider = validate_provider(provider)
     accent_id = (accent or ("auto" if provider == "omnivoice" else "neutral")).strip().lower()
@@ -1579,13 +1603,16 @@ async def clone_voice(
 
     if provider == "omnivoice":
         # The OmniVoice space reads the sample as reference audio (soundfile),
-        # which can't decode browser recordings (webm/opus). Normalize to WAV and
-        # use that as the reference sample; keep the original upload for audit.
+        # which can't decode browser recordings (webm/opus). Normalize to WAV,
+        # analyze pauses, and use one continuous pause-bounded reference clip;
+        # keep the original upload for audit.
         wav_path = source_path.with_suffix(".wav")
         if wav_path == source_path:
             wav_path = source_path.with_name(f"{source_path.stem}-normalized.wav")
         try:
-            await asyncio.to_thread(audio_export_service.export_wav, source_path, wav_path)
+            reference_clip = await asyncio.to_thread(audio_export_service.export_reference_wav, source_path, wav_path)
+        except ReferenceClipSelectionError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         except (subprocess.CalledProcessError, OSError) as exc:
             raise HTTPException(
                 status_code=400,
@@ -1597,6 +1624,7 @@ async def clone_voice(
             "provider": "omnivoice",
             "mode": "clone",
             "description": description,
+            "reference_clip": reference_clip.to_metadata(),
             "voice_message_studio_profile": {
                 "language": "en",
                 "accent": accent_id,

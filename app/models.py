@@ -405,9 +405,19 @@ class OmniVoiceTextConversionWarning(BaseModel):
     message: str = Field(description="Human-readable warning.")
 
 
+class OmniVoiceWeTextProcessing(BaseModel):
+    engine: str = Field(description="Speech-readiness engine applied after the LLM conversion.")
+    changed: bool = Field(description="Whether speech-readiness processing changed the LLM output.")
+    original_text: str = Field(description="Natural-language text returned by the LLM.")
+    text: str = Field(description="WeTextProcessing-normalized text checked and returned for OmniVoice.")
+
+
 class OmniVoiceTextConversionResponse(BaseModel):
     conversion_id: str = Field(description="Conversion id that was run.")
-    text: str = Field(description="Converted OmniVoice-ready text.")
+    text: str = Field(description="Final WeTextProcessing-normalized OmniVoice-ready text.")
+    wetext_processing: OmniVoiceWeTextProcessing = Field(
+        description="WeTextProcessing result applied after the LLM call and before readiness verification."
+    )
     prompts: OmniVoiceTextConversionPrompts = Field(description="Prompts used for the conversion.")
     warnings: list[OmniVoiceTextConversionWarning] = Field(description="Conversion quality warnings.")
     rule_check: OmniVoiceTextRuleResponse = Field(description="Existing OmniVoice text-rule result for converted text.")
