@@ -80,7 +80,7 @@ const PROVIDERS = [
     label: "RevVoice",
     shortLabel: "RV",
     modelLabel: "RevVoice Batch",
-    subtitle: "Local presets and sample-based clones through the Hugging Face Space.",
+    subtitle: "Local presets and sample-based clones Audio Generation.",
     supportsVoiceLibrary: false,
     supportsRawVoiceId: false
   },
@@ -2244,31 +2244,35 @@ function VoiceRegistryPanel({
                   </small>
                 </button>
                 <div className="voice-row-actions">
-                  <button
-                    type="button"
-                    className="voice-icon-button"
-                    title={
-                      canPreview
-                        ? playingId === voice.id
-                          ? "Pause preview"
-                          : "Play preview"
-                        : "Preview unavailable for this voice"
-                    }
-                    aria-label={`Preview ${voice.display_name}`}
-                    onClick={() => togglePreview(voice)}
-                    disabled={!canPreview}
-                  >
-                    {playingId === voice.id ? <Pause size={15} /> : <Play size={15} />}
-                  </button>
-                  <button
-                    type="button"
-                    className="voice-icon-button"
-                    title={copiedId === voice.id ? "Copied!" : "Copy voice ID"}
-                    aria-label={`Copy voice ID for ${voice.display_name}`}
-                    onClick={() => copyVoiceId(voice)}
-                  >
-                    {copiedId === voice.id ? <CheckCircle2 size={15} /> : <Copy size={15} />}
-                  </button>
+                  {activeProvider === "elevenlabs" ? (
+                    <>
+                      <button
+                        type="button"
+                        className="voice-icon-button"
+                        title={
+                          canPreview
+                            ? playingId === voice.id
+                              ? "Pause preview"
+                              : "Play preview"
+                            : "Preview unavailable for this voice"
+                        }
+                        aria-label={`Preview ${voice.display_name}`}
+                        onClick={() => togglePreview(voice)}
+                        disabled={!canPreview}
+                      >
+                        {playingId === voice.id ? <Pause size={15} /> : <Play size={15} />}
+                      </button>
+                      <button
+                        type="button"
+                        className="voice-icon-button"
+                        title={copiedId === voice.id ? "Copied!" : "Copy voice ID"}
+                        aria-label={`Copy voice ID for ${voice.display_name}`}
+                        onClick={() => copyVoiceId(voice)}
+                      >
+                        {copiedId === voice.id ? <CheckCircle2 size={15} /> : <Copy size={15} />}
+                      </button>
+                    </>
+                  ) : null}
                   <button
                     type="button"
                     className="voice-icon-button voice-delete-button"
@@ -3364,7 +3368,8 @@ function BatchPanel({
         <div>
           <h2>Batch Excel</h2>
           <p>
-            Upload an .xlsx workbook. The first sheet only needs message text in the first column.
+            Upload an .xlsx workbook. The first sheet only needs message text in the first column. If
+            the first row is a header, name it 'text'; otherwise, use no header.
           </p>
         </div>
         <FileSpreadsheet size={21} />
