@@ -1403,7 +1403,11 @@ async def convert_omnivoice_text(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     converted = wetext_processing.text
-    warnings = validate_converted_text(converted, request.inputs)
+    warnings = validate_converted_text(
+        converted,
+        request.inputs,
+        profile=definition.validation_profile,
+    )
     rule_check = _text_rule_response(converted)
     ready_for_omnivoice = rule_check.ready and not any(warning.severity == "error" for warning in warnings)
     return OmniVoiceTextConversionResponse(

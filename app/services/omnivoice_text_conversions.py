@@ -15,6 +15,7 @@ TARGET_MAX_WORDS = 120
 WORDS_PER_MINUTE = 135
 
 FOUNDER_LINKEDIN_VOICE_NOTE_ID = "founder_linkedin_voice_note"
+REVVOICE_EMOTIONAL_VOICE_NOTE_ID = "revvoice_emotional_voice_note"
 
 CONVERSION_SYSTEM_PROMPT = """You convert founder-outreach text into a LinkedIn voice note optimized for OmniVoice text-to-speech.
 
@@ -103,6 +104,177 @@ Verified observation: {{verified_observation}}
 Pronunciation notes: {{pronunciation_notes}}
 
 Text to convert exactly; do not summarize or add new facts:
+{{source_text}}
+"""
+
+REVVOICE_EMOTIONAL_SYSTEM_PROMPT = """# OmniVoice Emotional Voice-Note Conversion
+
+You are a speech-first editor for an expressive TTS model called OmniVoice.
+
+Your goal is not to preserve the exact wording of the source text.
+
+Your goal is to create the most natural, emotionally engaging, and human-sounding voice note possible while preserving the original intent, facts, and message.
+
+The output should sound like a thoughtful professional speaking directly to another person.
+
+It should never sound like someone reading an email, LinkedIn message, marketing copy, or corporate communication aloud.
+
+## Primary Objective
+
+Optimize for spoken delivery.
+
+Prioritize:
+
+1. Emotional authenticity
+2. Natural conversational flow
+3. Human connection
+4. Listener engagement
+5. Preservation of core meaning
+
+Do not prioritize preserving the exact wording, sentence structure, or level of explicitness used in the original text.
+
+## Meaning Preservation
+
+Preserve:
+
+* core intent
+* factual claims
+* names
+* dates
+* numbers
+* relationships
+* opportunities being described
+
+You may rewrite, reorganize, expand, or reframe language as needed for natural speech.
+
+The output should communicate the same message, not necessarily the same wording.
+
+## Emotional Amplification
+
+OmniVoice performs best when emotional intent is explicit.
+
+When positive intent is implied, you should surface that intent naturally.
+
+You may strengthen implied emotions including:
+
+* interest
+* appreciation
+* excitement
+* curiosity
+* confidence
+* admiration
+* encouragement
+* enthusiasm
+* belief in fit
+
+The goal is emotional clarity, not literal translation.
+
+## Human Connection
+
+Make the recipient feel intentionally selected and personally noticed.
+
+Favor language that conveys:
+
+* genuine interest
+* thoughtful consideration
+* personal attention
+* authentic curiosity
+
+The listener should feel that the speaker specifically wanted to reach out to them.
+
+## Voice Note Style
+
+Write as if the speaker is sending a personal voice note.
+
+Use:
+
+* contractions
+* conversational phrasing
+* natural spoken transitions
+* occasional reflective pauses
+* short spoken sentences
+
+Avoid:
+
+* corporate language
+* marketing language
+* written-language complexity
+* formal business writing
+* excessive jargon
+
+## Abbreviation Pronunciation
+
+Normalize these abbreviations for natural TTS pronunciation:
+
+* US -> U-S
+* CRO -> C-R-O
+* CMO -> C-M-O
+
+## Spoken Rhythm
+
+Break long thoughts into smaller spoken units.
+
+Use punctuation to support delivery:
+
+* commas for brief pauses
+* em dashes for transitions
+* occasional ellipses for reflection
+* paragraph breaks between major ideas
+
+The text should feel easy to perform naturally.
+
+## Value Elaboration
+
+When benefits or outcomes are stated briefly, you may make them more concrete and listener-friendly.
+
+You may explain why something matters if that explanation is already implied by the original text.
+
+Do not introduce new factual claims.
+
+## Outreach Messages
+
+For recruiting, partnerships, networking, fundraising, business development, or founder outreach:
+
+Lead with genuine interest before discussing the opportunity.
+
+The conversation should feel exploratory rather than transactional.
+
+The recipient should feel respected, chosen, and thoughtfully approached.
+
+## Emotional Delivery Rule
+
+When choosing between:
+
+* literal wording fidelity
+
+and
+
+* stronger emotional delivery that preserves the same underlying intent
+
+prefer stronger emotional delivery.
+
+The output should sound excellent when spoken by OmniVoice.
+
+## Output Requirements
+
+Return only the rewritten spoken version.
+
+Do not explain changes.
+
+Do not include notes.
+
+Do not include analysis.
+
+Do not include formatting instructions.
+
+Do not include labels.
+
+Do not include stage directions.
+
+Do not include SSML.
+"""
+
+REVVOICE_EMOTIONAL_USER_PROMPT_TEMPLATE = """text:
 {{source_text}}
 """
 
@@ -202,6 +374,7 @@ class TextConversionDefinition:
     output_rules: tuple[str, ...]
     default_system_prompt: str
     default_user_prompt_template: str
+    validation_profile: str = "founder_outreach"
 
 
 @dataclass(frozen=True)
@@ -291,6 +464,40 @@ TEXT_CONVERSIONS = (
         ),
         default_system_prompt=CONVERSION_SYSTEM_PROMPT,
         default_user_prompt_template=FOUNDER_LINKEDIN_USER_PROMPT_TEMPLATE,
+    ),
+    TextConversionDefinition(
+        id=REVVOICE_EMOTIONAL_VOICE_NOTE_ID,
+        label="RevVoice emotional voice note",
+        purpose="Rewrite source text into a natural, emotionally engaging spoken voice note for RevVoice.",
+        description=(
+            "Use when spoken delivery and human connection matter more than literal wording. The conversion may "
+            "reorganize or emotionally amplify implied intent while preserving the supplied facts and core message."
+        ),
+        input_fields=(
+            ConversionInputField(
+                id="source_text",
+                label="Source text",
+                control="textarea",
+                required=True,
+                placeholder=(
+                    "Hi Anushua Roy, We're a NY-based PE/VC fund. We work closely with funded Indian B2B founders "
+                    "expanding into the US..."
+                ),
+                help="Paste the source message. The conversion may rewrite its wording, but must preserve its facts and intent.",
+            ),
+        ),
+        output_rules=(
+            "Return only the rewritten spoken version.",
+            "Preserve core intent, facts, names, dates, numbers, relationships, and opportunities.",
+            "Prioritize emotional authenticity, conversational flow, human connection, and listener engagement.",
+            "Make implied positive intent explicit without introducing new factual claims.",
+            "Use contractions, short spoken sentences, natural transitions, and performance-friendly punctuation.",
+            "Avoid corporate, marketing, overly formal, and jargon-heavy language.",
+            "Do not include notes, analysis, labels, stage directions, formatting instructions, SSML, or explanations.",
+        ),
+        default_system_prompt=REVVOICE_EMOTIONAL_SYSTEM_PROMPT,
+        default_user_prompt_template=REVVOICE_EMOTIONAL_USER_PROMPT_TEMPLATE,
+        validation_profile="emotional_voice_note",
     ),
 )
 
@@ -452,7 +659,12 @@ def format_for_voice_pacing(text: str) -> str:
     return protected.strip()
 
 
-def validate_converted_text(text: str, inputs: dict[str, str]) -> list[ConversionWarning]:
+def validate_converted_text(
+    text: str,
+    inputs: dict[str, str],
+    *,
+    profile: str = "founder_outreach",
+) -> list[ConversionWarning]:
     warnings: list[ConversionWarning] = []
     stripped = text.strip()
     lowered = stripped.lower()
@@ -471,19 +683,20 @@ def validate_converted_text(text: str, inputs: dict[str, str]) -> list[Conversio
         if word in lowered:
             warnings.append(ConversionWarning("error", "marketing_language", f"Remove marketing word: {word}."))
 
-    for phrase in sorted(FORMAL_OR_SELECTION_PHRASES):
-        if phrase in lowered:
-            warnings.append(ConversionWarning("warning", "salesy_or_selection_language", f"Review phrase: {phrase}."))
+    if profile == "founder_outreach":
+        for phrase in sorted(FORMAL_OR_SELECTION_PHRASES):
+            if phrase in lowered:
+                warnings.append(ConversionWarning("warning", "salesy_or_selection_language", f"Review phrase: {phrase}."))
 
-    for phrase in sorted(INFERRED_BENEFIT_PHRASES):
-        if phrase in lowered:
-            warnings.append(
-                ConversionWarning(
-                    "warning",
-                    "inferred_benefit",
-                    f"Review possible inferred benefit or persuasive conclusion: {phrase}.",
+        for phrase in sorted(INFERRED_BENEFIT_PHRASES):
+            if phrase in lowered:
+                warnings.append(
+                    ConversionWarning(
+                        "warning",
+                        "inferred_benefit",
+                        f"Review possible inferred benefit or persuasive conclusion: {phrase}.",
+                    )
                 )
-            )
 
     for abbreviation, fix in UNEXPANDED_ABBREVIATIONS.items():
         if re.search(rf"(?<![A-Z-]){re.escape(abbreviation)}(?![A-Z-])", stripped):
@@ -518,7 +731,7 @@ def validate_converted_text(text: str, inputs: dict[str, str]) -> list[Conversio
             )
         )
 
-    if not verified_observation:
+    if profile == "founder_outreach" and not verified_observation:
         for phrase in sorted(VAGUE_OR_UNVERIFIED_COMPLIMENTS):
             if phrase in lowered:
                 warnings.append(

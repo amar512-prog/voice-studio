@@ -4,6 +4,7 @@ import unittest
 
 from app.services.omnivoice_text_conversions import (
     FOUNDER_LINKEDIN_VOICE_NOTE_ID,
+    REVVOICE_EMOTIONAL_VOICE_NOTE_ID,
     TextConversionError,
     WeTextEnglishProcessor,
     apply_wetext_processing,
@@ -20,6 +21,58 @@ class OmniVoiceTextConversionsTest(unittest.TestCase):
         self.assertIsNotNone(definition)
         with self.assertRaisesRegex(Exception, "Source outreach text is required"):
             build_conversion_prompts(definition, {})
+
+    def test_revvoice_emotional_conversion_uses_supplied_prompt_and_source_only(self) -> None:
+        definition = get_text_conversion(REVVOICE_EMOTIONAL_VOICE_NOTE_ID)
+        self.assertIsNotNone(definition)
+        self.assertEqual([field.id for field in definition.input_fields], ["source_text"])
+
+        system, user = build_conversion_prompts(
+            definition,
+            {
+                "source_text": (
+                    "Hi Anushua Roy, We're a NY-based PE/VC fund. We came across Recro "
+                    "and think you'd be a strong fit."
+                ),
+            },
+        )
+
+        self.assertIn("# OmniVoice Emotional Voice-Note Conversion", system)
+        self.assertIn("prefer stronger emotional delivery", system)
+        self.assertIn("Return only the rewritten spoken version.", system)
+        self.assertIn("US -> U-S", system)
+        self.assertIn("CRO -> C-R-O", system)
+        self.assertIn("CMO -> C-M-O", system)
+        self.assertEqual(
+            user,
+            (
+                "text:\n"
+                "Hi Anushua Roy, We're a NY-based PE/VC fund. We came across Recro "
+                "and think you'd be a strong fit.\n"
+            ),
+        )
+
+    def test_revvoice_emotional_validation_allows_prompt_requested_amplification(self) -> None:
+        warnings = validate_converted_text(
+            (
+                "Hi Anushua Roy, we were genuinely impressed by Recro. "
+                "We believe you'd be a strong fit for the shortlisted cohort."
+            ),
+            {},
+            profile="emotional_voice_note",
+        )
+        rules = {warning.rule for warning in warnings}
+        self.assertNotIn("salesy_or_selection_language", rules)
+        self.assertNotIn("inferred_benefit", rules)
+        self.assertNotIn("unverified_personalization", rules)
+
+    def test_revvoice_emotional_validation_keeps_shared_duration_gate(self) -> None:
+        warnings = validate_converted_text(
+            " ".join(["word"] * 140),
+            {},
+            profile="emotional_voice_note",
+        )
+        self.assertTrue(any(warning.rule == "voice_note_duration" for warning in warnings))
 
     def test_prompt_keeps_missing_observation_neutral(self) -> None:
         definition = get_text_conversion(FOUNDER_LINKEDIN_VOICE_NOTE_ID)

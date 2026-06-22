@@ -652,6 +652,18 @@ def main() -> int:
                 headers=api_headers,
             ).json()
             assert conversions["conversions"][0]["id"] == "founder_linkedin_voice_note"
+            assert {conversion["id"] for conversion in conversions["conversions"]} == {
+                "founder_linkedin_voice_note",
+                "revvoice_emotional_voice_note",
+            }
+            emotional_conversion = next(
+                conversion
+                for conversion in conversions["conversions"]
+                if conversion["id"] == "revvoice_emotional_voice_note"
+            )
+            assert [field["id"] for field in emotional_conversion["input_fields"]] == ["source_text"]
+            assert "# OmniVoice Emotional Voice-Note Conversion" in emotional_conversion["default_system_prompt"]
+            assert emotional_conversion["default_user_prompt_template"] == "text:\n{{source_text}}\n"
             assert conversions["conversions"][0]["configured"] is True
             assert conversions["conversions"][0]["default_max_tokens"] == app_module.settings.openrouter_max_tokens
             converted = call(

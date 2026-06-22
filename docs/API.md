@@ -97,14 +97,26 @@ preprocess/postprocess). The built-in **`english_american`** and
 ### OmniVoice text conversions
 
 Text conversions run before generation and before the lower-level text-rules
-checker. The first available conversion is
-`founder_linkedin_voice_note`, which turns founder outreach copy into a warm
-LinkedIn voice-note script for OmniVoice.
+checker. The catalog currently includes:
+
+- `founder_linkedin_voice_note`, which turns founder outreach copy into a warm,
+  low-pressure LinkedIn voice-note script.
+- `revvoice_emotional_voice_note`, which uses the OmniVoice Emotional
+  Voice-Note Conversion prompt to prioritize spoken delivery, emotional
+  authenticity, human connection, and preservation of the source message's
+  facts and intent. It accepts only `source_text`.
 
 The original natural-language `source_text` and context fields are sent to the
 LLM unchanged. After conversion, the backend normalizes the LLM output with
 WeTextProcessing English TN. Conversion warnings and the OmniVoice text-rules
 check run against that final speech-ready text.
+
+Conversion-specific quality rules remain separate. The founder-outreach
+conversion additionally warns about selection language, inferred benefits, and
+unverified compliments. The emotional conversion permits the prompt's requested
+emotional amplification and selection intent, while the shared output-only,
+marketing-language, pronunciation, contraction, duration, and spoken-sentence
+checks still run.
 
 Known TTS-safe tokens produced by the LLM, including `U-S`, `U.S.`, `P-E V-C`,
 `G-T-M`, `C-R-O`, `C-M-O`, `B-to-B`, and bracketed CMU phonemes, are preserved
