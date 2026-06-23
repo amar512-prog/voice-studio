@@ -77,6 +77,7 @@ const DEFAULT_PROVIDER = "omnivoice";
 const PROVIDERS = [
   {
     id: "omnivoice",
+    slug: "revvoice",
     label: "RevVoice",
     shortLabel: "RV",
     modelLabel: "RevVoice Batch",
@@ -95,6 +96,12 @@ const PROVIDERS = [
   }
 ];
 const PROVIDER_BY_ID = new Map(PROVIDERS.map((provider) => [provider.id, provider]));
+const PROVIDER_ROUTE_ALIASES = new Map(
+  PROVIDERS.flatMap((provider) => {
+    const aliases = new Set([provider.id, provider.slug].filter(Boolean));
+    return Array.from(aliases, (alias) => [alias, provider.id]);
+  })
+);
 const OMNIVOICE_BUILTIN_CONTEXT_IDS = new Set(["english_american", "english_indian"]);
 
 const PROVIDER_PAGE_COPY = {
@@ -188,12 +195,26 @@ function pageDescriptionFor(provider, pageId, fallback) {
   return PROVIDER_PAGE_COPY[provider]?.[pageId] || fallback;
 }
 
+function providerIdFromRouteSegment(segment) {
+  return PROVIDER_ROUTE_ALIASES.get(segment) || null;
+}
+
+function providerUrlSegment(provider) {
+  return PROVIDER_BY_ID.get(provider)?.slug || provider;
+}
+
+function storedProviderId() {
+  const stored = window.localStorage.getItem("voice-message-provider");
+  return PROVIDER_BY_ID.has(stored) ? stored : providerIdFromRouteSegment(stored) || DEFAULT_PROVIDER;
+}
+
 function routeStateFromPath(pathname) {
-  const storedProvider = window.localStorage.getItem("voice-message-provider") || DEFAULT_PROVIDER;
+  const storedProvider = storedProviderId();
   const normalized = pathname === "/" ? "" : pathname.replace(/\/$/, "");
   const parts = normalized.split("/").filter(Boolean);
-  const provider = PROVIDER_BY_ID.has(parts[0]) ? parts[0] : storedProvider;
-  const routeParts = PROVIDER_BY_ID.has(parts[0]) ? parts.slice(1) : parts;
+  const routeProvider = providerIdFromRouteSegment(parts[0]);
+  const provider = routeProvider || storedProvider;
+  const routeParts = routeProvider ? parts.slice(1) : parts;
   const routePath = routeParts.length ? `/${routeParts.join("/")}` : "/generate";
 
   if (routePath === "/history" || routePath.startsWith("/history/")) {
@@ -214,10 +235,11 @@ function routeStateFromPath(pathname) {
 
 function pagePath(provider, pageId, jobId = null) {
   const page = PAGE_BY_ID.get(pageId) || PAGE_BY_ID.get("generate");
+  const routeProvider = providerUrlSegment(provider);
   if (page.id === "history" && jobId) {
-    return `/${provider}/history/${encodeURIComponent(jobId)}`;
+    return `/${routeProvider}/history/${encodeURIComponent(jobId)}`;
   }
-  return `/${provider}${page.path}`;
+  return `/${routeProvider}${page.path}`;
 }
 
 function apiPath(provider, suffix) {

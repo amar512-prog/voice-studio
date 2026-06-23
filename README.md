@@ -29,11 +29,11 @@ For the OmniVoice Hugging Face Space integration, the backend now also accepts:
 
 The product now supports provider-scoped flows for both ElevenLabs and OmniVoice. OmniVoice uses curated preset voices plus local sample-based clones, and its voice-design prompts intentionally stay close to the upstream supported attribute format.
 
-OmniVoice includes built-in American and Indian design presets, a `/omnivoice/text-conversion` page with both low-pressure founder outreach and emotional RevVoice voice-note conversions, and a `/omnivoice/rules` checker. Text Conversion uses OpenRouter from the backend and does not request or log model reasoning. Generation is blocked when text still contains `/`; recognized dates such as `15/12/2025` and uppercase shorthand such as `PE/VC` receive reviewable spoken-text suggestions before the user applies them.
+OmniVoice includes built-in American and Indian design presets, exposed in the frontend under RevVoice URLs such as `/revvoice/text-conversion`, with both low-pressure founder outreach and emotional RevVoice voice-note conversions, and a `/revvoice/rules` checker. Text Conversion uses OpenRouter from the backend and does not request or log model reasoning. Generation is blocked when text still contains `/`; recognized dates such as `15/12/2025` and uppercase shorthand such as `PE/VC` receive reviewable spoken-text suggestions before the user applies them.
 
 For a shared server, set `HOST_BIND=127.0.0.1` and an unused `HOST_PORT` such as `8011`, then point the existing HTTPS reverse proxy to that local port. The generated audio and saved voices persist under `./data`.
 
-The UI is split into provider-scoped task pages such as `/elevenlabs/generate`, `/elevenlabs/voices`, `/omnivoice/text-conversion`, `/omnivoice/clone`, and `/omnivoice/history`. Authenticated downloads use `/api/{provider}/files/...`.
+The UI is split into provider-scoped task pages such as `/elevenlabs/generate`, `/elevenlabs/voices`, `/revvoice/text-conversion`, `/revvoice/clone`, and `/revvoice/history`. Authenticated downloads use `/api/{provider}/files/...`; RevVoice frontend pages continue to call the backend OmniVoice provider API under `/api/omnivoice/...`.
 
 The full API surface is documented in [docs/API.md](docs/API.md); interactive Swagger UI is served at `/docs`.
 
