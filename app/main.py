@@ -1512,7 +1512,9 @@ async def preview_omnivoice_context(
     except OmniVoiceTextRuleError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     settings = _omnivoice_settings({"settings": request.settings.model_dump()})
-    item: dict = {"text": request.text, "instruct": request.instruct, "language": str(request.language or "en")}
+    item: dict = {"text": request.text, "language": str(request.language or "en")}
+    if request.instruct.strip():
+        item["instruct"] = request.instruct
     if settings.get("speed") is not None:
         item["speed"] = settings["speed"]
     if settings.get("duration"):

@@ -93,17 +93,23 @@ class ReferenceClipSelectionTest(unittest.TestCase):
         self.assertAlmostEqual(result.selected_end_seconds, 11.2)
         self.assertEqual(result.score, 0.8)
 
-    def test_long_recording_without_pause_boundaries_keeps_whole_clip(self) -> None:
+    def test_long_recording_without_pause_boundaries_trims_to_longest_speech_window(self) -> None:
+        # No pauses in a 12s source: the whole clip is one speech run, so we keep
+        # its longest continuous span capped to max_seconds (10s) rather than
+        # shipping an over-length reference.
         result = make_plan(12.0, [])
 
-        self.assertFalse(result.trimmed)
-        self.assertEqual(result.selection_mode, "smallest_boundary_clip")
+        self.assertTrue(result.trimmed)
+        self.assertEqual(result.selection_mode, "longest_speech_window")
         self.assertEqual(result.selected_start_seconds, 0.0)
-        self.assertEqual(result.selected_end_seconds, 12.0)
+        self.assertEqual(result.selected_end_seconds, 10.0)
         self.assertEqual(result.candidate_count, 1)
         self.assertIn("no_clean_3_to_10_second_pause_bounded_window", result.warnings)
 
-    def test_long_recording_without_valid_target_uses_smallest_boundary_clip(self) -> None:
+    def test_long_recording_without_valid_target_uses_longest_speech_window(self) -> None:
+        # Regression guard: a long source whose only pauses leave no clean 3-10s
+        # pause-bounded window must fall back to the *longest* speech run (capped
+        # to max_seconds), never a tiny boundary fragment that collapses output.
         result = make_plan(
             24.0,
             [
@@ -114,9 +120,10 @@ class ReferenceClipSelectionTest(unittest.TestCase):
         )
 
         self.assertTrue(result.trimmed)
-        self.assertEqual(result.selection_mode, "smallest_boundary_clip")
-        self.assertAlmostEqual(result.selected_start_seconds, 0.3)
-        self.assertAlmostEqual(result.selected_end_seconds, 2.2)
+        self.assertEqual(result.selection_mode, "longest_speech_window")
+        self.assertAlmostEqual(result.selected_start_seconds, 2.3)
+        self.assertAlmostEqual(result.selected_end_seconds, 12.3)
+        self.assertEqual(result.selected_duration_seconds, 10.0)
         self.assertGreaterEqual(result.candidate_count, 1)
         self.assertIn("no_clean_3_to_10_second_pause_bounded_window", result.warnings)
 

@@ -379,7 +379,7 @@ def select_reference_clip(
                 score_breakdown=score_breakdown,
                 candidate_count=1,
             )
-        fallback = _smallest_boundary_clip(
+        fallback = _longest_speech_clip(
             source_duration,
             normalized_silences,
             speech_intervals,
@@ -449,7 +449,7 @@ def _clip_result(
     )
 
 
-def _smallest_boundary_clip(
+def _longest_speech_clip(
     source_duration: float,
     silences: tuple[SilenceSpan, ...],
     speech_intervals: tuple[tuple[float, float], ...],
@@ -460,6 +460,12 @@ def _smallest_boundary_clip(
     boundary_padding_seconds: float,
     detected_silence_count: int,
 ) -> ReferenceClipResult | None:
+    """Fallback when no clean 3-10s pause-bounded window exists.
+
+    Take the longest continuous run of speech (so we never pick a tiny silent
+    fragment) and cap it to max_seconds. This guarantees a usable reference
+    rather than a sub-second clip that collapses OmniVoice output.
+    """
     clips = []
     for speech_start, speech_end in speech_intervals:
         start = max(0.0, speech_start - boundary_padding_seconds)
@@ -469,7 +475,16 @@ def _smallest_boundary_clip(
         clips.append((round(end - start, 3), start, end))
     if not clips:
         return None
-    _, start, end = min(clips)
+
+    # Longest speech run, capped to max_seconds from its start.
+    _, start, end = max(clips)
+    if end - start > max_seconds:
+        end = round(start + max_seconds, 3)
+
+    warnings: list[str] = ["no_clean_3_to_10_second_pause_bounded_window"]
+    if end - start < min_seconds:
+        warnings.append("shorter_than_recommended")
+
     score, score_breakdown = _score_reference_candidate(
         source_duration,
         silences,
@@ -485,7 +500,7 @@ def _smallest_boundary_clip(
         source_duration,
         start,
         end,
-        "smallest_boundary_clip",
+        "longest_speech_window",
         detected_silence_count,
         silence_threshold_db,
         min_pause_seconds,
@@ -493,7 +508,7 @@ def _smallest_boundary_clip(
         score=score,
         score_breakdown=score_breakdown,
         candidate_count=len(clips),
-        warnings=("no_clean_3_to_10_second_pause_bounded_window",),
+        warnings=tuple(warnings),
     )
 
 

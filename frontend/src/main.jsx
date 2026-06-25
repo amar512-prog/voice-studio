@@ -1536,7 +1536,9 @@ function GeneratePage({
 
       {!isElevenLabs && (
         <OmniVoiceContextEditor
-          contexts={omnivoiceContexts}
+          contexts={(omnivoiceContexts || []).filter(
+            (context) => !OMNIVOICE_BUILTIN_CONTEXT_IDS.has(context.id)
+          )}
           selectedId={ttsForm.speech_context}
           onSelect={(id) => setTtsForm((current) => ({ ...current, speech_context: id }))}
           previewContext={previewContext}
@@ -1724,10 +1726,61 @@ function OmniVoiceSamplesPanel({ voices }) {
   );
 }
 
+// Voice-design attributes are picked from fixed lists and composed into the
+// comma-separated `instruct` string OmniVoice expects. "auto" means omit it.
+const VOICE_DESIGN_FIELDS = [
+  { key: "gender", label: "Gender", options: ["auto", "male", "female"] },
+  {
+    key: "age",
+    label: "Age",
+    options: ["auto", "child", "teenager", "young adult", "middle-aged", "elderly"]
+  },
+  {
+    key: "pitch",
+    label: "Pitch",
+    options: ["auto", "very low pitch", "low pitch", "moderate pitch", "high pitch", "very high pitch"]
+  },
+  {
+    key: "accent",
+    label: "Accent",
+    options: [
+      "auto",
+      "american accent",
+      "british accent",
+      "australian accent",
+      "canadian accent",
+      "indian accent",
+      "chinese accent",
+      "korean accent",
+      "japanese accent",
+      "portuguese accent",
+      "russian accent"
+    ]
+  }
+];
+
+function composeInstruct(form) {
+  return VOICE_DESIGN_FIELDS.map((field) => form[field.key])
+    .filter((value) => value && value !== "auto")
+    .join(", ");
+}
+
+function parseInstruct(instruct) {
+  const tokens = String(instruct || "")
+    .split(",")
+    .map((token) => token.trim().toLowerCase());
+  const result = {};
+  for (const field of VOICE_DESIGN_FIELDS) {
+    result[field.key] =
+      field.options.find((option) => option !== "auto" && tokens.includes(option)) || "auto";
+  }
+  return result;
+}
+
 function contextToForm(ctx) {
   const s = (ctx && ctx.settings) || {};
   return {
-    instruct: ctx?.instruct ?? "american accent",
+    ...parseInstruct(ctx?.instruct),
     language: ctx?.language ?? "",
     speed: s.speed ?? 1.0,
     duration: s.duration ?? 0,
@@ -1785,7 +1838,7 @@ function OmniVoiceContextEditor({
     try {
       const payload = await previewContext({
         text: previewText || "Hey there, this is a quick preview of this voice design.",
-        instruct: form.instruct,
+        instruct: composeInstruct(form),
         language: form.language || null,
         settings: settings()
       });
@@ -1804,7 +1857,7 @@ function OmniVoiceContextEditor({
       await saveContext({
         id: selected.id,
         name: selected.name,
-        instruct: form.instruct,
+        instruct: composeInstruct(form),
         language: form.language || null,
         settings: settings()
       });
@@ -1822,7 +1875,7 @@ function OmniVoiceContextEditor({
     try {
       const saved = await saveContext({
         name: newName.trim(),
-        instruct: form.instruct,
+        instruct: composeInstruct(form),
         language: form.language || null,
         settings: settings()
       });
@@ -1871,14 +1924,20 @@ function OmniVoiceContextEditor({
             )}
           </div>
 
-          <label className="tone-field tone-wide">
-            Instruct (voice design attributes)
-            <input
-              value={form.instruct}
-              onChange={(event) => update("instruct", event.target.value)}
-              placeholder="american accent"
-            />
-          </label>
+          <div className="tone-grid">
+            {VOICE_DESIGN_FIELDS.map((field) => (
+              <label className="tone-field" key={field.key}>
+                {field.label}
+                <select value={form[field.key]} onChange={(event) => update(field.key, event.target.value)}>
+                  {field.options.map((option) => (
+                    <option key={option} value={option}>
+                      {option === "auto" ? "Auto" : option}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            ))}
+          </div>
 
           <div className="tone-grid">
             <label className="tone-field">
@@ -1907,14 +1966,6 @@ function OmniVoiceContextEditor({
             <label><input type="checkbox" checked={form.denoise} onChange={(e) => update("denoise", e.target.checked)} /> Denoise</label>
             <label><input type="checkbox" checked={form.preprocess_prompt} onChange={(e) => update("preprocess_prompt", e.target.checked)} /> Preprocess prompt</label>
             <label><input type="checkbox" checked={form.postprocess_output} onChange={(e) => update("postprocess_output", e.target.checked)} /> Postprocess output</label>
-          </div>
-
-          <div className="tone-actions">
-            <button type="button" className="secondary-button" onClick={handlePreview} disabled={previewing || !form.instruct.trim()}>
-              <Play size={16} />
-              {previewing ? "Generating..." : "Preview design"}
-            </button>
-            {previewUrl && <audio controls src={previewUrl} />}
           </div>
 
           {localError && <p className="login-error">{localError}</p>}

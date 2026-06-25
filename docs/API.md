@@ -62,7 +62,7 @@ Example:
 | DELETE | `/api/{provider}/voices/{record_id}` | both | Delete a saved voice. |
 | GET | `/api/{provider}/voices/{record_id}/preview` | both | 307-redirect to a preview clip (best-effort). |
 | POST | `/api/{provider}/voices/sync` | both | ElevenLabs: pull eligible workspace voices. OmniVoice: seed/refresh the design presets. |
-| POST | `/api/{provider}/voices/clone` | both | Multipart upload of a consented sample. ElevenLabs clones server-side; OmniVoice stores a local normalized reference WAV, selecting the best-scored continuous 3-10s pause-bounded clip when available, otherwise the shortest pause/source-bounded clip (optional `reference_text`). |
+| POST | `/api/{provider}/voices/clone` | both | Multipart upload of a consented sample. ElevenLabs clones server-side; OmniVoice stores a local normalized reference WAV, selecting the best-scored continuous 3-10s pause-bounded clip when available, otherwise the longest continuous speech run capped to 10s (optional `reference_text`). |
 | GET | `/api/{provider}/voices/options` | **elevenlabs** | Browse the ElevenLabs library/premade (paged/sorted/accent-filtered). 404 for OmniVoice. |
 | POST | `/api/{provider}/voice-options/{voice_id}/save` | **elevenlabs** | Save a picked library/premade voice. |
 | POST | `/api/{provider}/voices/by-id` | **elevenlabs** | Register a raw ElevenLabs voice id. |
