@@ -285,7 +285,10 @@ function languageLabel(value) {
 }
 
 function voiceOptionLabel(voice, provider) {
-  if (provider !== "omnivoice") return voice.display_name;
+  if (provider !== "omnivoice") {
+    const accent = ACCENT_LABELS[voice.accent];
+    return accent ? `${voice.display_name} - ${accent}` : voice.display_name;
+  }
   if (voice.source_type !== "cloned") return voice.display_name;
   const profile = voice.provider_metadata?.voice_message_studio_profile || {};
   const language = languageLabel(profile.language);
@@ -1508,13 +1511,8 @@ function GeneratePage({
   busy
 }) {
   const isElevenLabs = activeProvider === "elevenlabs";
-  const filteredVoices = useMemo(
-    () => (isElevenLabs ? voices.filter((voice) => voice.accent === ttsForm.accent) : voices),
-    [voices, ttsForm.accent, isElevenLabs]
-  );
-  const selectedVoiceVisible = filteredVoices.some((voice) => voice.voice_id === ttsForm.voice_id);
-  const selectedVoice = filteredVoices.find((voice) => voice.voice_id === ttsForm.voice_id);
-  const accentLabel = ACCENT_LABELS[ttsForm.accent] || "selected accent";
+  const selectedVoiceVisible = voices.some((voice) => voice.voice_id === ttsForm.voice_id);
+  const selectedVoice = voices.find((voice) => voice.voice_id === ttsForm.voice_id);
   const contextOptions = isElevenLabs
     ? config.contexts || []
     : (omnivoiceContexts || []).map((c) => ({ id: c.id, label: c.name }));
@@ -1602,15 +1600,13 @@ function GeneratePage({
               value={selectedVoiceVisible ? ttsForm.voice_id : ""}
               onChange={(event) => selectVoice(event.target.value)}
             >
-              <option value="">
-                {isElevenLabs ? `Choose ${accentLabel} voice` : "Choose voice"}
-              </option>
-              {filteredVoices.length === 0 && (
+              <option value="">Choose voice</option>
+              {voices.length === 0 && (
                 <option value="" disabled>
-                  {isElevenLabs ? `No ${accentLabel} voices saved` : "No voices saved"}
+                  No voices saved
                 </option>
               )}
-              {filteredVoices.map((voice) => (
+              {voices.map((voice) => (
                 <option key={voice.id} value={voice.voice_id}>
                   {isElevenLabs ? voiceOptionLabel(voice, activeProvider) : voice.display_name}
                 </option>
