@@ -16,6 +16,7 @@ OPTIONAL_COLUMNS = {
     "target_seconds",
     "wpm",
     "export_m4a",
+    "enhance_text",
 }
 
 
@@ -56,6 +57,7 @@ class WorkbookService:
                         target_seconds=int(values.get("target_seconds") or 55),
                         wpm=int(values.get("wpm") or 135),
                         export_m4a=self._bool(values.get("export_m4a"), default=True),
+                        enhance_text=self._bool(values.get("enhance_text"), default=False),
                     )
                 )
             except Exception as exc:

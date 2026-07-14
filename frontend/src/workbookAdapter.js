@@ -274,8 +274,19 @@ export function buildBatchWorkbookFile({
   targetSeconds,
   wpm,
   exportM4a,
+  enhanceText,
 }) {
-  const headers = ["text", "voice_id", "voice_name", "accent", "speech_context", "target_seconds", "wpm", "export_m4a"];
+  const headers = [
+    "text",
+    "voice_id",
+    "voice_name",
+    "accent",
+    "speech_context",
+    "target_seconds",
+    "wpm",
+    "export_m4a",
+    "enhance_text",
+  ];
   const rows = [
     headers,
     ...texts.map((text) => [
@@ -287,6 +298,7 @@ export function buildBatchWorkbookFile({
       String(targetSeconds || 55),
       String(wpm || 135),
       exportM4a ? "true" : "false",
+      enhanceText ? "true" : "false",
     ]),
   ];
 

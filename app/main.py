@@ -61,6 +61,7 @@ from app.models import (
 from app.services.audio_export import AudioExportService, ReferenceClipSelectionError
 from app.services.duration import DurationService
 from app.services.elevenlabs import ElevenLabsClient, ElevenLabsError
+from app.services.elevenlabs_text_enhance import build_enhance_prompts
 from app.services.omnivoice import OmniVoiceClient, OmniVoiceError
 from app.services.omnivoice_text_conversions import (
     OpenRouterTextConversionClient,
@@ -511,6 +512,7 @@ def api_config() -> dict:
         "default_target_seconds": settings.default_target_seconds,
         "default_wpm": settings.default_wpm,
         "max_duration_seconds": settings.max_duration_seconds,
+        "openrouter_configured": text_conversion_client.configured,
         "contexts": [
             {
                 "id": context,
@@ -2480,6 +2482,7 @@ async def _finalize_audio_row(
     source_format: str,
     model_id: str | None,
     created_at: datetime,
+    spoken_text: str | None = None,
 ) -> AudioResult:
     """Persist audio (transcoding wav->mp3 when needed), measure, optional m4a, build the result."""
     estimated_seconds = duration_service.estimate_seconds(request.text, request.wpm)
@@ -2521,6 +2524,7 @@ async def _finalize_audio_row(
         index=index,
         status="completed",
         text=request.text,
+        spoken_text=spoken_text,
         voice_id=request.voice_id,
         voice_name=request.voice_name,
         model_id=model_id,
@@ -2599,12 +2603,40 @@ async def generate_row(provider: str, job_id: str, index: int, request: TtsReque
                     effective_voice_settings.update(
                         request.voice_settings_override.model_dump(exclude_none=True)
                     )
+                spoken_text = None
+                if request.enhance_text and text_conversion_client.configured:
+                    context_id = (
+                        request.speech_context
+                        if request.speech_context in CONTEXT_LABELS
+                        else "outreach_conversational"
+                    )
+                    system_prompt, user_prompt = build_enhance_prompts(
+                        text=request.text,
+                        context_label=CONTEXT_LABELS[context_id],
+                        context_note=CONTEXT_NOTES[context_id],
+                        model_id=settings.elevenlabs_model_id,
+                        target_seconds=request.target_seconds,
+                    )
+                    try:
+                        spoken_text = await text_conversion_client.convert(
+                            system_prompt=system_prompt,
+                            user_prompt=user_prompt,
+                            max_tokens=1200,
+                        )
+                    except TextConversionError as exc:
+                        logger.warning(
+                            "Spoken-text enhancement failed for job %s row %s; using original text: %s",
+                            job_id,
+                            index,
+                            exc,
+                        )
                 mp3_bytes = await elevenlabs.text_to_speech(
                     voice_id=request.voice_id,
-                    text=request.text,
+                    text=spoken_text or request.text,
                     speech_context=request.speech_context,
                     voice_settings=effective_voice_settings,
                     language_code=language_code,
+                    apply_delivery_tag=spoken_text is None,
                 )
                 return await _finalize_audio_row(
                     provider_storage,
@@ -2615,6 +2647,7 @@ async def generate_row(provider: str, job_id: str, index: int, request: TtsReque
                     source_format="mp3",
                     model_id=settings.elevenlabs_model_id,
                     created_at=created_at,
+                    spoken_text=spoken_text,
                 )
 
             item, gen_settings = _omnivoice_item(provider_storage, provider_registry, request)

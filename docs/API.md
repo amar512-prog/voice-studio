@@ -207,6 +207,15 @@ curl -s -H "X-API-Key: $KEY" -X POST localhost:8000/api/omnivoice/text-rules/che
   optional `voice_settings_override` object can override any of `stability`
   (0-1), `similarity_boost` (0-1), `style` (0-1), and `speed` (0.7-1.2).
   Any omitted field inherits the selected context default.
+- **ElevenLabs `enhance_text`** (default `false`; the web UI sends `true` by
+  default): an OpenRouter LLM first rewrites the written text into natural
+  spoken form — numbers, currencies, dates, URLs, and abbreviations expanded —
+  and, when the model is `eleven_v3`, adds a few bracketed audio tags that
+  direct emotional delivery (the per-context leading tag is skipped in that
+  case). Requires `OPENROUTER_API_KEY`; if the conversion is unavailable or
+  fails, generation proceeds with the original text. The final spoken text is
+  returned as `spoken_text` on the result row. The batch workbook accepts an
+  optional `enhance_text` column with the same semantics per row.
 - **OmniVoice**: `voice_id` is either a **design preset** (`ov_design_*`, no
   sample — the preset bundles its own context) or a **clone** (uploaded sample,
   uses the selected `speech_context`). The payload combines the sample's

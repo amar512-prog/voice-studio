@@ -487,6 +487,7 @@ function App() {
     accent: "us",
     speech_context: initialRoute.provider === "omnivoice" ? "english_american" : "outreach_conversational",
     voice_settings_override: emptyElevenLabsVoiceSettings(),
+    enhance_text: true,
     target_seconds: 55,
     wpm: 135,
     export_m4a: true
@@ -496,6 +497,7 @@ function App() {
     voice_name: "",
     accent: "us",
     speech_context: initialRoute.provider === "omnivoice" ? "english_american" : "outreach_conversational",
+    enhance_text: true,
     target_seconds: 55,
     wpm: 135,
     export_m4a: true
@@ -1031,8 +1033,10 @@ function App() {
         } else {
           delete request.voice_settings_override;
         }
+        request.enhance_text = Boolean(config?.openrouter_configured && ttsForm.enhance_text);
       } else {
         delete request.voice_settings_override;
+        delete request.enhance_text;
       }
       const payload = await apiJson(apiPath(activeProvider, "/tts"), {
         method: "POST",
@@ -1156,7 +1160,10 @@ function App() {
         speechContext: batchForm.speech_context,
         targetSeconds: Number(batchForm.target_seconds),
         wpm: Number(batchForm.wpm),
-        exportM4a: batchForm.export_m4a
+        exportM4a: batchForm.export_m4a,
+        enhanceText:
+          activeProvider === "elevenlabs" &&
+          Boolean(config?.openrouter_configured && batchForm.enhance_text)
       });
       const form = new FormData();
       form.append("file", workbook, workbook.name);
@@ -1592,6 +1599,27 @@ function GeneratePage({
             placeholder="Hey Priya, quick one. I noticed your team is hiring across outbound roles..."
           />
         </label>
+
+        {isElevenLabs && (
+          <label className="checkbox-line clone-noise-setting">
+            <input
+              type="checkbox"
+              checked={Boolean(config.openrouter_configured && ttsForm.enhance_text)}
+              disabled={!config.openrouter_configured}
+              onChange={(event) =>
+                setTtsForm((current) => ({ ...current, enhance_text: event.target.checked }))
+              }
+            />
+            <span>
+              Prepare spoken delivery
+              <small>
+                {config.openrouter_configured
+                  ? "Rewrites the message into natural spoken text (numbers, dates, and links expanded) and adds Eleven v3 emotion tags before generating. Untick to send the text exactly as written."
+                  : "Unavailable: set OPENROUTER_API_KEY on the server to enable. The text is sent exactly as written."}
+              </small>
+            </span>
+          </label>
+        )}
 
         <div className={`field-grid voice-field-grid${hideSpeechContext ? " single" : ""}`}>
           <label>
@@ -3514,6 +3542,12 @@ function ResultPanel({ activeProvider, result }) {
             </span>
           </div>
           {result.model_id && <div className="model-note">Generated with {modelLabel(activeProvider, result.model_id)}</div>}
+          {result.spoken_text && (
+            <div className="spoken-text-note">
+              <strong>Spoken text</strong>
+              <p>{result.spoken_text}</p>
+            </div>
+          )}
           {result.mp3_url && <audio controls src={result.mp3_url} />}
           <div className="download-row">
             {result.mp3_url && (
@@ -3904,6 +3938,26 @@ function BatchPanel({
           </label>
         )}
       </div>
+      {isElevenLabs && (
+        <label className="checkbox-line clone-noise-setting">
+          <input
+            type="checkbox"
+            checked={Boolean(config.openrouter_configured && batchForm.enhance_text)}
+            disabled={!config.openrouter_configured}
+            onChange={(event) =>
+              setBatchForm((current) => ({ ...current, enhance_text: event.target.checked }))
+            }
+          />
+          <span>
+            Prepare spoken delivery
+            <small>
+              {config.openrouter_configured
+                ? "Rewrites every row into natural spoken text and adds Eleven v3 emotion tags before generating. Untick to send each row exactly as written."
+                : "Unavailable: set OPENROUTER_API_KEY on the server to enable. Rows are sent exactly as written."}
+            </small>
+          </span>
+        </label>
+      )}
       <label className="file-drop">
         <Upload size={18} />
         <span>{batchFile?.name || "Choose .xlsx workbook"}</span>

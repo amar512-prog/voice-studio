@@ -161,6 +161,9 @@ class ConfigResponse(BaseModel):
     default_target_seconds: int = Field(description="Default soft target duration.")
     default_wpm: int = Field(description="Default words-per-minute estimate.")
     max_duration_seconds: int = Field(description="Hard LinkedIn duration limit.")
+    openrouter_configured: bool = Field(
+        description="Whether OpenRouter is configured for spoken-text enhancement and text conversion."
+    )
     contexts: list[ContextOption] = Field(description="Available speech contexts.")
     accents: list[AccentOption] = Field(description="Available accent buckets.")
 
@@ -555,6 +558,15 @@ class TtsRequest(BaseModel):
             "speech context defaults."
         ),
     )
+    enhance_text: bool = Field(
+        default=False,
+        description=(
+            "ElevenLabs only: when true, an OpenRouter LLM first rewrites the written text into "
+            "spoken form (numbers, dates, URLs, and abbreviations expanded) and, on Eleven v3, "
+            "adds audio tags that direct emotional delivery. Requires OPENROUTER_API_KEY; when "
+            "the conversion is unavailable or fails, the original text is used unchanged."
+        ),
+    )
     target_seconds: int = Field(default=55, ge=1, le=60, description="Soft target duration for yellow warnings.")
     wpm: int = Field(default=135, ge=60, le=240, description="Words-per-minute estimate used before generation.")
     export_m4a: bool = Field(
@@ -571,6 +583,7 @@ class TtsRequest(BaseModel):
                 "accent": "us",
                 "speech_context": "outreach_conversational",
                 "voice_settings_override": {"stability": 0.5, "speed": 0.96},
+                "enhance_text": True,
                 "target_seconds": 55,
                 "wpm": 135,
                 "export_m4a": True,
@@ -606,6 +619,14 @@ class TtsApiRequest(BaseModel):
             "and speed. Omitted fields inherit from speech_context."
         ),
     )
+    enhance_text: bool = Field(
+        default=False,
+        description=(
+            "ElevenLabs only: when true, an OpenRouter LLM rewrites the written text into spoken "
+            "form and, on Eleven v3, adds emotional audio tags before generation. Falls back to "
+            "the original text when OpenRouter is unconfigured or the conversion fails."
+        ),
+    )
 
     model_config = {
         "extra": "allow",
@@ -615,6 +636,7 @@ class TtsApiRequest(BaseModel):
                 "voice_id": "21m00Tcm4TlvDq8ikWAM",
                 "speech_context": "outreach_conversational",
                 "voice_settings_override": {"stability": 0.5, "speed": 0.96},
+                "enhance_text": True,
             }
         },
     }
@@ -632,6 +654,7 @@ class TtsApiRequest(BaseModel):
             voice_id=self.voice_id,
             speech_context=self.speech_context,
             voice_settings_override=self.voice_settings_override,
+            enhance_text=self.enhance_text,
             **extras,
         )
 
@@ -647,6 +670,13 @@ class AudioResult(BaseModel):
     index: int | None = Field(default=None, description="1-based row index within the job.")
     status: Literal["completed", "failed"] = Field(description="Generation outcome for this row.")
     text: str = Field(description="Input text for this row.")
+    spoken_text: str | None = Field(
+        default=None,
+        description=(
+            "Final spoken text sent to the provider when `enhance_text` ran, including any "
+            "Eleven v3 audio tags. Null when the original text was used unchanged."
+        ),
+    )
     voice_id: str = Field(description="ElevenLabs voice id used for this row.")
     voice_name: str | None = Field(default=None, description="Optional voice display name.")
     model_id: str | None = Field(default=None, description="ElevenLabs model id used.")

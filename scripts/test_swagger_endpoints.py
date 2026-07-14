@@ -52,6 +52,7 @@ class FakeElevenLabs:
         speech_context: str,
         voice_settings: dict[str, float | bool] | None = None,
         language_code: str | None = None,
+        apply_delivery_tag: bool = True,
     ) -> bytes:
         self.tts_calls.append(
             {
@@ -59,6 +60,7 @@ class FakeElevenLabs:
                 "speech_context": speech_context,
                 "voice_settings": voice_settings,
                 "language_code": language_code,
+                "apply_delivery_tag": apply_delivery_tag,
             }
         )
         return b"fake-mp3-bytes"
@@ -394,7 +396,14 @@ def main() -> int:
             tts_body_ref = tts_operation["requestBody"]["content"]["application/json"]["schema"]["$ref"]
             tts_request_schema = openapi["components"]["schemas"][tts_body_ref.rsplit("/", 1)[-1]]
             tts_schema = tts_request_schema["properties"]
-            assert set(tts_schema) == {"text", "voice_id", "speech_context", "voice_settings_override"}
+            assert set(tts_schema) == {
+                "text",
+                "voice_id",
+                "speech_context",
+                "voice_settings_override",
+                "enhance_text",
+            }
+            assert "OpenRouter LLM rewrites the written text" in tts_schema["enhance_text"]["description"]
             assert set(tts_request_schema["required"]) == {"text", "voice_id"}
             assert "OmniVoice preset or cloned/sample voice id" in tts_schema["voice_id"]["description"]
             assert "OmniVoice: required saved speech-context id" in tts_schema["speech_context"]["description"]

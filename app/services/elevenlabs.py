@@ -32,6 +32,7 @@ class ElevenLabsClient:
         speech_context: str,
         voice_settings: dict[str, float | bool] | None = None,
         language_code: str | None = None,
+        apply_delivery_tag: bool = True,
     ) -> bytes:
         api_key = self._require_key()
         url = f"{self.settings.elevenlabs_base_url}/text-to-speech/{voice_id}"
@@ -39,7 +40,9 @@ class ElevenLabsClient:
         # the built-in context preset is only a fallback when nothing is passed.
         voice_settings = dict(voice_settings) if voice_settings else resolve_voice_settings(speech_context)
         payload = {
-            "text": self._prepare_text(text, speech_context),
+            # Enhanced text arrives with its own audio tags, so the per-context
+            # leading delivery tag is skipped for it.
+            "text": self._prepare_text(text, speech_context) if apply_delivery_tag else text.strip(),
             "model_id": self.settings.elevenlabs_model_id,
             "language_code": language_code or self.settings.elevenlabs_language_code,
             "voice_settings": voice_settings,
