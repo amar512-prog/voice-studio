@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 Accent = Literal["us", "in", "neutral", "auto"]
 SpeechContext = Literal[
     "outreach_conversational",
+    "founder_outreach_human",
     "customer_support",
     "narration",
     "announcement",
@@ -40,10 +41,111 @@ class LogoutResponse(BaseModel):
     ok: bool = Field(description="True when the session was cleared.")
 
 
+class ElevenLabsVoiceSettings(BaseModel):
+    stability: float = Field(
+        ge=0.0,
+        le=1.0,
+        description="Effective ElevenLabs delivery consistency, from more expressive (0) to more stable (1).",
+        examples=[0.5],
+    )
+    similarity_boost: float = Field(
+        ge=0.0,
+        le=1.0,
+        description="Effective ElevenLabs similarity to the selected voice, from 0 to 1.",
+        examples=[0.75],
+    )
+    style: float = Field(
+        ge=0.0,
+        le=1.0,
+        description="Effective style exaggeration for ElevenLabs models that support it; 0 is the safe default.",
+        examples=[0.0],
+    )
+    speed: float = Field(
+        ge=0.7,
+        le=1.2,
+        description="Effective ElevenLabs playback-speed multiplier; 1 is normal speed and model support may vary.",
+        examples=[1.0],
+    )
+
+
+class ElevenLabsVoiceSettingsOverride(BaseModel):
+    """Optional ElevenLabs settings layered over the selected speech-context defaults."""
+
+    stability: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Optional ElevenLabs stability override from more expressive (0) to more stable (1). "
+            "Omit or send null to inherit the selected speech context."
+        ),
+        examples=[0.5],
+    )
+    similarity_boost: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Optional ElevenLabs voice-similarity override from 0 to 1. Omit or send null to "
+            "inherit the selected speech context; the effect can vary by model."
+        ),
+        examples=[0.75],
+    )
+    style: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Optional ElevenLabs style-exaggeration override from 0 to 1. Omit or send null to "
+            "inherit the selected context; 0 is the safe default and model support varies."
+        ),
+        examples=[0.0],
+    )
+    speed: float | None = Field(
+        default=None,
+        ge=0.7,
+        le=1.2,
+        description=(
+            "Optional ElevenLabs speed multiplier from 0.7 to 1.2, where 1 is normal speed. "
+            "Omit or send null to inherit the selected context; model support varies."
+        ),
+        examples=[0.96],
+    )
+
+
 class ContextOption(BaseModel):
     id: SpeechContext = Field(description="Speech context id accepted by TTS requests.")
     label: str = Field(description="UI label.")
     note: str = Field(description="Short delivery guidance.")
+    voice_settings: ElevenLabsVoiceSettings = Field(description="ElevenLabs defaults used by this context.")
+
+
+class ElevenLabsContextSettingsRequest(BaseModel):
+    """Backward-compatible partial update for one ElevenLabs speech context."""
+
+    voice_settings: ElevenLabsVoiceSettingsOverride | None = Field(
+        default=None,
+        description=(
+            "Optional partial ElevenLabs settings object. Send one, several, or all existing fields. "
+            "Omitted or null fields preserve the saved value, falling back to the built-in context preset."
+        ),
+    )
+
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {"voice_settings": {"stability": 0.42}},
+                {
+                    "voice_settings": {
+                        "stability": 0.5,
+                        "similarity_boost": 0.7,
+                        "style": 0.0,
+                        "speed": 0.96,
+                    }
+                },
+            ]
+        }
+    }
 
 
 class AccentOption(BaseModel):
@@ -446,6 +548,13 @@ class TtsRequest(BaseModel):
             "`english_american` or `english_indian`."
         ),
     )
+    voice_settings_override: ElevenLabsVoiceSettingsOverride | None = Field(
+        default=None,
+        description=(
+            "Optional ElevenLabs-only per-generation overrides. Omitted fields use the selected "
+            "speech context defaults."
+        ),
+    )
     target_seconds: int = Field(default=55, ge=1, le=60, description="Soft target duration for yellow warnings.")
     wpm: int = Field(default=135, ge=60, le=240, description="Words-per-minute estimate used before generation.")
     export_m4a: bool = Field(
@@ -461,6 +570,7 @@ class TtsRequest(BaseModel):
                 "voice_name": "Founder voice",
                 "accent": "us",
                 "speech_context": "outreach_conversational",
+                "voice_settings_override": {"stability": 0.5, "speed": 0.96},
                 "target_seconds": 55,
                 "wpm": 135,
                 "export_m4a": True,
@@ -489,6 +599,13 @@ class TtsApiRequest(BaseModel):
             "`english_american` or `english_indian`."
         ),
     )
+    voice_settings_override: ElevenLabsVoiceSettingsOverride | None = Field(
+        default=None,
+        description=(
+            "Optional ElevenLabs-only overrides for stability, similarity_boost, style, "
+            "and speed. Omitted fields inherit from speech_context."
+        ),
+    )
 
     model_config = {
         "extra": "allow",
@@ -497,6 +614,7 @@ class TtsApiRequest(BaseModel):
                 "text": "Hey Priya, quick one. I noticed your team is hiring across outbound roles.",
                 "voice_id": "21m00Tcm4TlvDq8ikWAM",
                 "speech_context": "outreach_conversational",
+                "voice_settings_override": {"stability": 0.5, "speed": 0.96},
             }
         },
     }
@@ -513,6 +631,7 @@ class TtsApiRequest(BaseModel):
             text=self.text,
             voice_id=self.voice_id,
             speech_context=self.speech_context,
+            voice_settings_override=self.voice_settings_override,
             **extras,
         )
 

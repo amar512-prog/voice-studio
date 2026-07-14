@@ -15,12 +15,25 @@ class VoiceRegistry:
         # mix of the event loop and the threadpool, so concurrent upsert/delete
         # could otherwise interleave and silently drop each other's changes.
         self._lock = threading.Lock()
+        self._raw_cache: tuple[int, list] | None = None
+
+    def _read_raw(self) -> list:
+        """Read registry.json, cached until the file changes on disk."""
+        try:
+            mtime_ns = self.storage.registry_path.stat().st_mtime_ns
+        except OSError:
+            return []
+        cached = self._raw_cache
+        if cached is not None and cached[0] == mtime_ns:
+            return cached[1]
+        raw_records = self.storage.read_json(self.storage.registry_path, [])
+        self._raw_cache = (mtime_ns, raw_records)
+        return raw_records
 
     def list(self) -> list[VoiceRecord]:
-        raw_records = self.storage.read_json(self.storage.registry_path, [])
         return [
             VoiceRecord.model_validate(record)
-            for record in raw_records
+            for record in self._read_raw()
             if is_registry_eligible(record)
         ]
 

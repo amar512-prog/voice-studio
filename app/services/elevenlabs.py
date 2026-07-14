@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import ExitStack
+import json
 from pathlib import Path
 from typing import Any
 
 import httpx
 
 from app.config import Settings
-from app.services.speech_context import DELIVERY_TAGS_BY_CONTEXT, VOICE_SETTINGS_BY_CONTEXT
+from app.services.speech_context import DELIVERY_TAGS_BY_CONTEXT, resolve_voice_settings
 
 
 class ElevenLabsError(RuntimeError):
@@ -23,16 +25,23 @@ class ElevenLabsClient:
             raise ElevenLabsError("ELEVENLABS_API_KEY is not configured.")
         return self.settings.elevenlabs_api_key
 
-    async def text_to_speech(self, voice_id: str, text: str, speech_context: str) -> bytes:
+    async def text_to_speech(
+        self,
+        voice_id: str,
+        text: str,
+        speech_context: str,
+        voice_settings: dict[str, float | bool] | None = None,
+        language_code: str | None = None,
+    ) -> bytes:
         api_key = self._require_key()
         url = f"{self.settings.elevenlabs_base_url}/text-to-speech/{voice_id}"
-        voice_settings = VOICE_SETTINGS_BY_CONTEXT.get(
-            speech_context, VOICE_SETTINGS_BY_CONTEXT["outreach_conversational"]
-        )
+        # Callers pass the fully resolved settings (saved context + overrides);
+        # the built-in context preset is only a fallback when nothing is passed.
+        voice_settings = dict(voice_settings) if voice_settings else resolve_voice_settings(speech_context)
         payload = {
             "text": self._prepare_text(text, speech_context),
             "model_id": self.settings.elevenlabs_model_id,
-            "language_code": self.settings.elevenlabs_language_code,
+            "language_code": language_code or self.settings.elevenlabs_language_code,
             "voice_settings": voice_settings,
         }
         headers = {
@@ -179,8 +188,9 @@ class ElevenLabsClient:
         self,
         name: str,
         description: str,
-        sample_path: Path,
-        content_type: str | None,
+        sample_files: list[tuple[Path, str | None]],
+        labels: dict[str, str],
+        remove_background_noise: bool,
     ) -> dict[str, Any]:
         api_key = self._require_key()
         url = f"{self.settings.elevenlabs_base_url}/voices/add"
@@ -188,11 +198,22 @@ class ElevenLabsClient:
         data = {
             "name": name,
             "description": description,
-            "remove_background_noise": "true",
+            "labels": json.dumps(labels),
+            "remove_background_noise": str(remove_background_noise).lower(),
         }
         try:
-            with sample_path.open("rb") as handle:
-                files = {"files": (sample_path.name, handle, content_type or "application/octet-stream")}
+            with ExitStack() as stack:
+                files = [
+                    (
+                        "files",
+                        (
+                            sample_path.name,
+                            stack.enter_context(sample_path.open("rb")),
+                            content_type or "application/octet-stream",
+                        ),
+                    )
+                    for sample_path, content_type in sample_files
+                ]
                 async with httpx.AsyncClient(timeout=180) as client:
                     response = await client.post(url, headers=headers, data=data, files=files)
         except httpx.HTTPError as exc:

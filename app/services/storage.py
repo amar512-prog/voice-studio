@@ -100,9 +100,10 @@ class StorageService:
     def batch_path(self, batch_id: str, filename: str) -> Path:
         return self.batch_dir / safe_filename(f"{batch_id}-{filename}")
 
-    def source_audio_path(self, voice_record_id: str, filename: str) -> Path:
+    def source_audio_path(self, voice_record_id: str, filename: str, sample_index: int | None = None) -> Path:
         suffix = Path(filename).suffix or ".audio"
-        return self.source_dir / f"{voice_record_id}{suffix}"
+        stem = voice_record_id if sample_index is None else f"{voice_record_id}-{sample_index:02d}"
+        return self.source_dir / f"{stem}{suffix}"
 
     def relative_to_data(self, path: Path) -> str:
         return path.resolve().relative_to(self.root.resolve()).as_posix()

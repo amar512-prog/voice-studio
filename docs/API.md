@@ -62,11 +62,19 @@ Example:
 | DELETE | `/api/{provider}/voices/{record_id}` | both | Delete a saved voice. |
 | GET | `/api/{provider}/voices/{record_id}/preview` | both | 307-redirect to a preview clip (best-effort). |
 | POST | `/api/{provider}/voices/sync` | both | ElevenLabs: pull eligible workspace voices. OmniVoice: seed/refresh the design presets. |
-| POST | `/api/{provider}/voices/clone` | both | Multipart upload of a consented sample. ElevenLabs clones server-side; OmniVoice stores a local normalized reference WAV, selecting the best-scored continuous 3-10s pause-bounded clip when available, otherwise the longest continuous speech run capped to 10s (optional `reference_text`). |
+| POST | `/api/{provider}/voices/clone` | both | Multipart clone upload. ElevenLabs accepts repeated `samples`, accent plus optional gender/age labels, and optional `remove_background_noise`; English is fixed internally. OmniVoice accepts one `sample` and stores a local normalized reference WAV, selecting the best-scored continuous 3-10s pause-bounded clip when available, otherwise the longest continuous speech run capped to 10s (optional `reference_text`). |
 | GET | `/api/{provider}/voices/options` | **elevenlabs** | Browse the ElevenLabs library/premade (paged/sorted/accent-filtered). 404 for OmniVoice. |
 | POST | `/api/{provider}/voice-options/{voice_id}/save` | **elevenlabs** | Save a picked library/premade voice. |
 | POST | `/api/{provider}/voices/by-id` | **elevenlabs** | Register a raw ElevenLabs voice id. |
 | DELETE | `/api/{provider}/voices/cache` | **elevenlabs** | Clear the in-memory voice-library cache. |
+
+### ElevenLabs instant clone fields
+
+Use 1-2 minutes of clean, single-speaker audio for best results; avoid exceeding 3 minutes. Multiple files are uploaded as repeated `samples` multipart fields. The clone flow always sends English (`en`) plus the selected accent and optional gender/age labels, and keeps background-noise removal off unless explicitly enabled (behavior change: denoising was previously always on, so legacy clients that omit `remove_background_noise` now clone without it). Speech context is not stored by cloning; users select it independently on Generate or Batch. English is sent as the ElevenLabs `language_code` during TTS. Other labels remain voice metadata because the ElevenLabs TTS endpoint does not accept clone labels in its generation JSON.
+
+### ElevenLabs speech-context settings
+
+`PUT /api/{provider}/speech-contexts/{context_id}/voice-settings` retains its existing `voice_settings` wrapper and accepts a complete object for backward compatibility or a partial object containing any of stability, similarity boost, style, and speed. Omitted and null fields preserve the saved value, then fall back to the built-in context preset. The backend persists a complete normalized object, so existing stored data needs no migration. Saved values become the defaults for Generate and Batch, survive container rebuilds through the mounted provider data directory, and are returned by `/api/config`. Per-generation `voice_settings_override` values still take precedence.
 
 ### OmniVoice speech contexts (OmniVoice only; 404 for ElevenLabs)
 
@@ -191,9 +199,14 @@ curl -s -H "X-API-Key: $KEY" -X POST localhost:8000/api/omnivoice/text-rules/che
 ### Single generation
 
 `POST /api/{provider}/tts` body (`TtsRequest`): `text`, `voice_id`,
-`speech_context`, `accent`, `target_seconds`, `wpm`, `export_m4a`, …
+`speech_context`, `voice_settings_override`, `accent`, `target_seconds`, `wpm`,
+`export_m4a`, …
 
 - **ElevenLabs**: `speech_context` is one of the built-in delivery contexts.
+  `founder_outreach_human` uses the tested human-like founder settings. The
+  optional `voice_settings_override` object can override any of `stability`
+  (0-1), `similarity_boost` (0-1), `style` (0-1), and `speed` (0.7-1.2).
+  Any omitted field inherits the selected context default.
 - **OmniVoice**: `voice_id` is either a **design preset** (`ov_design_*`, no
   sample — the preset bundles its own context) or a **clone** (uploaded sample,
   uses the selected `speech_context`). The payload combines the sample's

@@ -39,9 +39,13 @@ The full API surface is documented in [docs/API.md](docs/API.md); interactive Sw
 
 The browser receives only the public Google client ID. Google credentials are verified by FastAPI, and generation, cloning, voice registry, batch, and saved-file routes require the signed session cookie.
 
-The default speech model is `eleven_v3`. Conversational generation uses ElevenLabs' Natural stability mode, a restrained delivery cue, and slightly slower pacing. Set `ELEVENLABS_MODEL_ID=eleven_multilingual_v2` to use the previous model without v3 delivery tags.
+The default speech model is `eleven_v3`. Conversational generation uses ElevenLabs' Natural stability mode, a restrained delivery cue, and slightly slower pacing. The Generate page includes a `Founder outreach — human-like` context and optional overrides for stability, similarity boost, style exaggeration, and speed. Blank overrides inherit the selected context. Set `ELEVENLABS_MODEL_ID=eleven_multilingual_v2` to use the previous model without v3 delivery tags. Context presets no longer send `use_speaker_boost` (Eleven v3 ignores it); on older models ElevenLabs now applies each voice's own stored default, which can change output loudness compared with earlier releases.
+
+The expanded ElevenLabs voice-settings panel includes a Save context settings button. Saving promotes the current overrides to persistent defaults for the selected speech context, so Generate and Batch reuse them after reloads and Docker rebuilds. The existing API wrapper accepts complete settings objects and backward-compatible partial updates; omitted or null values keep the current context defaults.
 
 Voice sync fetches the full ElevenLabs voice list and saves every English voice with a US, India, or neutral accent whose provider use case is conversational. The registry panel scrolls when more than five matching voices are available.
+
+ElevenLabs instant cloning supports one or more consented samples, fixed English plus accent/gender/age labels, and an optional background-noise removal switch. The UI recommends 1-2 minutes of clean, consistent, single-speaker audio and leaves denoising off for clean recordings. Speech context is selected independently on Generate or Batch, and English is sent to ElevenLabs as `language_code` during generation.
 
 ## Excel Batch Format
 

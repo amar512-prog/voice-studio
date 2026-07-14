@@ -5,9 +5,13 @@ import base64
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 import io
+import json
 import logging
+from pathlib import Path
+import re
 import shutil
 import subprocess
+import threading
 import zipfile
 from typing import Annotated
 
@@ -23,6 +27,9 @@ from app.models import (
     AudioResult,
     CacheClearResponse,
     ConfigResponse,
+    ContextOption,
+    ElevenLabsContextSettingsRequest,
+    ElevenLabsVoiceSettings,
     HealthResponse,
     JobDetail,
     JobStatus,
@@ -72,7 +79,7 @@ from app.services.omnivoice_text_rules import (
     check_omnivoice_text,
     require_omnivoice_text_ready,
 )
-from app.services.speech_context import CONTEXT_LABELS, CONTEXT_NOTES
+from app.services.speech_context import CONTEXT_LABELS, CONTEXT_NOTES, VOICE_SETTINGS_BY_CONTEXT
 from app.services.storage import StorageService, new_id, now_utc, safe_filename
 from app.services.voice_filter import ProviderVoiceProfile, provider_voice_profile, provider_voice_rank
 from app.services.voice_registry import VoiceRegistry
@@ -175,6 +182,7 @@ PROVIDER_PAGE_SIZE_MAX = 100
 # the provider. Cleared manually via DELETE /api/{provider}/voices/cache.
 _shared_page_cache: dict[str, dict] = {}
 _shared_voice_cache: dict[str, dict] = {}
+_elevenlabs_context_settings_lock = threading.Lock()
 
 # Default OmniVoice design contexts use only attributes accepted by upstream.
 OMNIVOICE_DEFAULT_CONTEXTS = [
@@ -440,6 +448,45 @@ def list_providers(_user: dict = Depends(current_user)) -> dict[str, object]:
     return _provider_catalog_payload()
 
 
+_elevenlabs_context_settings_cache: tuple[int, dict[str, dict[str, float]]] | None = None
+
+
+def _read_elevenlabs_context_settings() -> dict[str, dict[str, float]]:
+    """Load saved per-context ElevenLabs settings, cached until the file changes on disk."""
+    global _elevenlabs_context_settings_cache
+    path = storage_for("elevenlabs").speech_contexts_path
+    try:
+        mtime_ns = path.stat().st_mtime_ns
+    except OSError:
+        return {}
+    cached = _elevenlabs_context_settings_cache
+    if cached is not None and cached[0] == mtime_ns:
+        return dict(cached[1])
+    try:
+        raw_settings = storage_for("elevenlabs").read_json(path, {})
+    except json.JSONDecodeError:
+        logger.warning("Ignoring malformed ElevenLabs speech-context settings file at %s", path)
+        return {}
+    if not isinstance(raw_settings, dict):
+        return {}
+    validated: dict[str, dict[str, float]] = {}
+    for context_id, voice_settings in raw_settings.items():
+        if context_id not in CONTEXT_LABELS or not isinstance(voice_settings, dict):
+            continue
+        try:
+            validated[context_id] = ElevenLabsVoiceSettings.model_validate(voice_settings).model_dump()
+        except ValidationError:
+            continue
+    _elevenlabs_context_settings_cache = (mtime_ns, validated)
+    return dict(validated)
+
+
+def _elevenlabs_context_voice_settings(context_id: str) -> dict[str, float]:
+    fallback_id = context_id if context_id in VOICE_SETTINGS_BY_CONTEXT else "outreach_conversational"
+    saved = _read_elevenlabs_context_settings().get(fallback_id)
+    return dict(saved or VOICE_SETTINGS_BY_CONTEXT[fallback_id])
+
+
 @app.get(
     "/api/config",
     response_model=ConfigResponse,
@@ -455,6 +502,7 @@ def api_config() -> dict:
     This does not include secrets. Use it to discover active auth mode, duration
     defaults, speech-context ids, and supported accent buckets.
     """
+    saved_context_settings = _read_elevenlabs_context_settings()
     return {
         "auth_mode": settings.auth_mode,
         "google_client_id": settings.google_client_id,
@@ -464,7 +512,14 @@ def api_config() -> dict:
         "default_wpm": settings.default_wpm,
         "max_duration_seconds": settings.max_duration_seconds,
         "contexts": [
-            {"id": context, "label": CONTEXT_LABELS[context], "note": CONTEXT_NOTES[context]}
+            {
+                "id": context,
+                "label": CONTEXT_LABELS[context],
+                "note": CONTEXT_NOTES[context],
+                "voice_settings": dict(
+                    saved_context_settings.get(context) or VOICE_SETTINGS_BY_CONTEXT[context]
+                ),
+            }
             for context in CONTEXT_LABELS
         ],
         "accents": [
@@ -1207,6 +1262,59 @@ def _title_label(value: str) -> str:
 # ---- OmniVoice speech contexts (persisted, editable voice-design + settings) ----
 
 
+@app.put(
+    "/api/{provider}/speech-contexts/{context_id}/voice-settings",
+    response_model=ContextOption,
+    tags=["Speech Contexts"],
+    summary="Save ElevenLabs speech-context voice settings",
+    response_description="Updated speech context with its persisted ElevenLabs voice settings.",
+)
+def save_elevenlabs_context_settings(
+    provider: ElevenLabsProviderPath,
+    context_id: Annotated[
+        str,
+        ApiPath(
+            description="Built-in ElevenLabs speech-context id returned by `/api/config`.",
+            examples=["founder_outreach_human"],
+        ),
+    ],
+    request: ElevenLabsContextSettingsRequest,
+    _user: dict = Depends(current_user),
+) -> ContextOption:
+    """
+    Partially update the persisted Generate and Batch defaults for one ElevenLabs context.
+
+    The existing `voice_settings` wrapper and its stability, similarity_boost,
+    style, and speed fields are preserved for backward compatibility. Clients
+    may send one, several, all, or none of those fields. Null and omitted values
+    leave the current effective value unchanged. The response always contains
+    the complete effective settings. Model support for individual controls can
+    vary; Eleven v3 expression primarily comes from prompting and audio tags.
+    """
+    provider = validate_provider(provider)
+    if provider != "elevenlabs":
+        raise HTTPException(status_code=404, detail="Saved voice settings are available only for ElevenLabs.")
+    if context_id not in CONTEXT_LABELS:
+        raise HTTPException(status_code=404, detail="ElevenLabs speech context not found.")
+
+    provider_storage = storage_for(provider)
+    with _elevenlabs_context_settings_lock:
+        saved_settings = _read_elevenlabs_context_settings()
+        effective_settings = dict(saved_settings.get(context_id) or VOICE_SETTINGS_BY_CONTEXT[context_id])
+        if request.voice_settings is not None:
+            effective_settings.update(request.voice_settings.model_dump(exclude_none=True))
+        complete_settings = ElevenLabsVoiceSettings.model_validate(effective_settings)
+        saved_settings[context_id] = complete_settings.model_dump()
+        provider_storage.write_json(provider_storage.speech_contexts_path, saved_settings)
+
+    return ContextOption(
+        id=context_id,
+        label=CONTEXT_LABELS[context_id],
+        note=CONTEXT_NOTES[context_id],
+        voice_settings=complete_settings,
+    )
+
+
 def _require_omnivoice(provider: str) -> str:
     provider = validate_provider(provider)
     if provider != "omnivoice":
@@ -1546,8 +1654,8 @@ async def clone_voice(
         Form(
             description=(
                 "Accent id. OmniVoice accepts `us` (American English), `in` (Indian English), "
-                "or `auto` (detect from the reference sample). ElevenLabs accepts `us`, `in`, "
-                "or `neutral` (unspecified)."
+                "or `auto` (detect from the reference sample), defaulting to `auto` when omitted. "
+                "ElevenLabs accepts `us`, `in`, or `neutral`, defaulting to `neutral` when omitted."
             ),
             examples=["us", "in", "auto"],
         ),
@@ -1558,13 +1666,57 @@ async def clone_voice(
     ] = False,
     description: Annotated[
         str,
-        Form(description="Optional provider description. A safe default is used when empty."),
+        Form(description="Optional provider description. Omit or leave empty to use the existing safe default."),
     ] = "",
     reference_text: Annotated[
         str,
         Form(description="OmniVoice only: optional transcript of the sample to guide cloning."),
     ] = "",
-    sample: UploadFile = File(..., description="Consented voice sample file, such as mp3, wav, m4a, or webm."),
+    gender: Annotated[
+        str,
+        Form(
+            description=(
+                "ElevenLabs only: optional clone metadata label: `male`, `female`, or `neutral`. "
+                "Omit or leave empty to send no gender label."
+            )
+        ),
+    ] = "",
+    age: Annotated[
+        str,
+        Form(
+            description=(
+                "ElevenLabs only: optional clone metadata label: `young`, `middle-aged`, or `old`. "
+                "Omit or leave empty to send no age label."
+            )
+        ),
+    ] = "",
+    remove_background_noise: Annotated[
+        bool,
+        Form(
+            description=(
+                "ElevenLabs only: remove background noise before cloning. Leave false for an already clean sample "
+                "because denoising can reduce clone quality. Defaults to false."
+            )
+        ),
+    ] = False,
+    sample: Annotated[
+        UploadFile | None,
+        File(
+            description=(
+                "Legacy-compatible single consented sample field. Required for OmniVoice and still accepted for "
+                "existing ElevenLabs clients. At least one `sample` or `samples` upload is required operationally."
+            )
+        ),
+    ] = None,
+    samples: Annotated[
+        list[UploadFile] | None,
+        File(
+            description=(
+                "ElevenLabs only: optional multi-file form uploaded as repeated `samples` fields. At least one "
+                "`sample` or `samples` upload is required operationally."
+            )
+        ),
+    ] = None,
     _user: dict = Depends(current_user),
 ) -> VoiceRecord:
     """
@@ -1574,9 +1726,14 @@ async def clone_voice(
     recordings are analyzed as a whole and trimmed only to one continuous
     section: the best-scored 3-10 second pause-bounded clip when available
     (fluency, human-like delivery, and natural expression), otherwise the
-    shortest pause/source-bounded clip. ElevenLabs uploads the sample for
-    instant voice cloning. Both paths require explicit consent, and the uploaded
-    sample is retained under the app data directory for auditability.
+    shortest pause/source-bounded clip. ElevenLabs uploads one or more samples
+    for instant voice cloning. The legacy single `sample` field remains
+    accepted, while repeated `samples` fields support multiple files. ElevenLabs
+    sends a fixed English language label plus
+    accent/gender/age labels and the optional background-noise setting. Speech
+    context is deliberately selected later during generation. Both paths
+    require explicit consent, and uploaded samples are retained under the app
+    data directory for auditability.
     """
     provider = validate_provider(provider)
     accent_id = (accent or ("auto" if provider == "omnivoice" else "neutral")).strip().lower()
@@ -1600,12 +1757,49 @@ async def clone_voice(
             detail="Invalid argument `consent_confirmed`: must be `true` before cloning.",
         )
 
+    uploaded_samples = ([sample] if sample is not None else []) + list(samples or [])
+    if not uploaded_samples:
+        raise HTTPException(status_code=400, detail="Add at least one consented voice sample before cloning.")
+    if provider == "omnivoice" and len(uploaded_samples) != 1:
+        raise HTTPException(status_code=400, detail="OmniVoice cloning accepts exactly one voice sample.")
+
+    language_code = "en"
+    gender_label = gender.strip().lower()
+    age_label = age.strip().lower()
+    if provider == "elevenlabs":
+        if gender_label not in {"", "male", "female", "neutral"}:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid argument `gender`: expected `male`, `female`, `neutral`, or empty.",
+            )
+        if age_label not in {"", "young", "middle-aged", "old"}:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid argument `age`: expected `young`, `middle-aged`, `old`, or empty.",
+            )
+
     provider_storage = storage_for(provider)
     registry = registry_for(provider)
     record_id = new_id("voice")
-    source_path = provider_storage.source_audio_path(record_id, sample.filename or "sample.audio")
-    source_path.parent.mkdir(parents=True, exist_ok=True)
-    source_path.write_bytes(await sample.read())
+    sample_payloads: list[tuple[UploadFile, bytes]] = []
+    for index, uploaded_sample in enumerate(uploaded_samples, start=1):
+        sample_bytes = await uploaded_sample.read()
+        if not sample_bytes:
+            raise HTTPException(status_code=400, detail=f"Voice sample {index} is empty.")
+        sample_payloads.append((uploaded_sample, sample_bytes))
+
+    stored_samples: list[tuple[Path, str | None]] = []
+    for index, (uploaded_sample, sample_bytes) in enumerate(sample_payloads, start=1):
+        source_path = provider_storage.source_audio_path(
+            record_id,
+            uploaded_sample.filename or "sample.audio",
+            sample_index=index if len(uploaded_samples) > 1 else None,
+        )
+        source_path.parent.mkdir(parents=True, exist_ok=True)
+        source_path.write_bytes(sample_bytes)
+        stored_samples.append((source_path, uploaded_sample.content_type))
+
+    source_path = stored_samples[0][0]
 
     if provider == "omnivoice":
         # The OmniVoice space reads the sample as reference audio (soundfile),
@@ -1654,11 +1848,21 @@ async def clone_voice(
         return registry.upsert_record(record)
 
     try:
+        clone_labels = {
+            "language": language_code,
+            "accent": ACCENT_LABELS[accent_id],
+        }
+        if gender_label:
+            clone_labels["gender"] = gender_label
+        if age_label:
+            clone_labels["age"] = age_label
+        clone_description = description or "Voice cloned from consented samples in Voice Message Studio."
         provider_voice = await elevenlabs.clone_voice(
             name=name,
-            description=description or "Voice cloned from a consented sample in Voice Message Studio.",
-            sample_path=source_path,
-            content_type=sample.content_type,
+            description=clone_description,
+            sample_files=stored_samples,
+            labels=clone_labels,
+            remove_background_noise=remove_background_noise,
         )
     except ElevenLabsError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1676,7 +1880,17 @@ async def clone_voice(
         accent=accent_id,
         consent_status="confirmed",
         source_audio_path=provider_storage.relative_to_data(source_path),
-        provider_metadata=provider_voice,
+        provider_metadata={
+            **provider_voice,
+            "provider": "elevenlabs",
+            "mode": "instant_voice_clone",
+            "description": clone_description,
+            "labels": clone_labels,
+            "remove_background_noise": remove_background_noise,
+            "source_audio_paths": [
+                provider_storage.relative_to_data(path) for path, _content_type in stored_samples
+            ],
+        },
         created_at=timestamp,
         updated_at=timestamp,
     )
@@ -1730,7 +1944,12 @@ async def create_tts(provider: ProviderPath, request: TtsApiRequest, _user: dict
     Generate one MP3 voice note and persist it as a job.
 
     ElevenLabs uses `voice_id` as the provider voice id and `speech_context` as
-    an optional built-in delivery style. OmniVoice uses `voice_id` as a saved
+    an optional built-in delivery style. Its optional `voice_settings_override`
+    retains the existing nested schema and may provide stability,
+    similarity_boost, style, and speed individually; omitted or null values
+    inherit saved context settings and then the built-in context preset. Model
+    support varies, and Eleven v3 expression primarily comes from prompting and
+    audio tags. OmniVoice uses `voice_id` as a saved
     preset or cloned/sample voice and requires `speech_context` to be a saved
     OmniVoice speech-context id with voice design and generation settings.
     """
@@ -2369,10 +2588,23 @@ async def generate_row(provider: str, job_id: str, index: int, request: TtsReque
     async with _generation_semaphore:
         try:
             if provider == "elevenlabs":
+                language_code = None
+                voice_record = provider_registry.find_by_provider_voice_id(request.voice_id)
+                if voice_record:
+                    saved_language = (voice_record.provider_metadata.get("labels") or {}).get("language")
+                    if isinstance(saved_language, str) and re.fullmatch(r"[A-Za-z]{2}", saved_language.strip()):
+                        language_code = saved_language.strip().lower()
+                effective_voice_settings = _elevenlabs_context_voice_settings(request.speech_context)
+                if request.voice_settings_override:
+                    effective_voice_settings.update(
+                        request.voice_settings_override.model_dump(exclude_none=True)
+                    )
                 mp3_bytes = await elevenlabs.text_to_speech(
                     voice_id=request.voice_id,
                     text=request.text,
                     speech_context=request.speech_context,
+                    voice_settings=effective_voice_settings,
+                    language_code=language_code,
                 )
                 return await _finalize_audio_row(
                     provider_storage,

@@ -1190,6 +1190,71 @@ textarea:focus {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
 }
 
+.elevenlabs-settings-grid label small {
+  color: var(--muted);
+  font-weight: 500;
+  line-height: 1.35;
+}
+
+.elevenlabs-context-defaults {
+  display: grid;
+  gap: 12px;
+  padding: 14px 16px;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  background: #ffffff;
+}
+
+.elevenlabs-context-defaults p {
+  margin: 4px 0 0;
+  color: var(--muted);
+}
+
+.elevenlabs-setting-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.elevenlabs-setting-chips span {
+  border: 1px solid #cfe0dc;
+  border-radius: 999px;
+  padding: 5px 8px;
+  color: #315f59;
+  background: var(--soft);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.elevenlabs-settings-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  padding: 16px;
+}
+
+.elevenlabs-settings-grid label {
+  min-width: 0;
+}
+
+.elevenlabs-settings-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 16px 16px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.elevenlabs-settings-action-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .control-row {
   display: flex;
   flex-wrap: wrap;
@@ -1404,6 +1469,47 @@ audio {
   margin: 12px 0;
 }
 
+.clone-provider-settings {
+  display: grid;
+  gap: 12px;
+  margin: 14px 0;
+  padding: 14px;
+  border: 1px solid #d7e2ec;
+  border-radius: 8px;
+  background: #f8fafc;
+  min-width: 0;
+}
+
+.clone-provider-settings h3 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.clone-provider-settings p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.clone-label-grid {
+  margin-top: 0;
+}
+
+.clone-noise-setting {
+  align-items: flex-start;
+}
+
+.clone-noise-setting span {
+  display: grid;
+  gap: 3px;
+}
+
+.clone-noise-setting small {
+  color: var(--muted);
+  font-weight: 500;
+  line-height: 1.4;
+}
+
 .file-button,
 .file-drop {
   position: relative;
@@ -1556,6 +1662,12 @@ audio {
 .voices-stack {
   display: grid;
   gap: 18px;
+  min-width: 0;
+}
+
+.provider-options-panel,
+.provider-table-wrap {
+  min-width: 0;
 }
 
 .provider-options-panel .panel-title-row {
@@ -2104,7 +2216,8 @@ audio {
   .field-grid,
   .field-grid.two,
   .batch-selection-grid,
-  .speech-context-controls {
+  .speech-context-controls,
+  .elevenlabs-settings-grid {
     grid-template-columns: 1fr;
   }
 

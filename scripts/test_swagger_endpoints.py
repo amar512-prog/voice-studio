@@ -41,7 +41,26 @@ def configure_environment(data_dir: str) -> None:
 
 
 class FakeElevenLabs:
-    async def text_to_speech(self, voice_id: str, text: str, speech_context: str) -> bytes:
+    def __init__(self) -> None:
+        self.clone_calls: list[dict[str, Any]] = []
+        self.tts_calls: list[dict[str, Any]] = []
+
+    async def text_to_speech(
+        self,
+        voice_id: str,
+        text: str,
+        speech_context: str,
+        voice_settings: dict[str, float | bool] | None = None,
+        language_code: str | None = None,
+    ) -> bytes:
+        self.tts_calls.append(
+            {
+                "voice_id": voice_id,
+                "speech_context": speech_context,
+                "voice_settings": voice_settings,
+                "language_code": language_code,
+            }
+        )
         return b"fake-mp3-bytes"
 
     async def list_voices(self) -> list[dict[str, Any]]:
@@ -126,10 +145,25 @@ class FakeElevenLabs:
         self,
         name: str,
         description: str,
-        sample_path: Path,
-        content_type: str | None,
+        sample_files: list[tuple[Path, str | None]],
+        labels: dict[str, str],
+        remove_background_noise: bool,
     ) -> dict[str, Any]:
-        return {"voice_id": "cloned_test_voice", "name": name, "preview_url": "https://example.com/clone.mp3"}
+        self.clone_calls.append(
+            {
+                "name": name,
+                "description": description,
+                "sample_files": sample_files,
+                "labels": labels,
+                "remove_background_noise": remove_background_noise,
+            }
+        )
+        return {
+            "voice_id": "cloned_test_voice",
+            "name": name,
+            "preview_url": "https://example.com/clone.mp3",
+            "requires_verification": False,
+        }
 
 
 class FakeDurationService:
@@ -256,7 +290,8 @@ def main() -> int:
 
         from app import main as app_module
 
-        app_module.elevenlabs = FakeElevenLabs()
+        fake_elevenlabs = FakeElevenLabs()
+        app_module.elevenlabs = fake_elevenlabs
         app_module._clients["omnivoice"] = FakeOmniVoice()
         app_module.text_conversion_client = FakeTextConversionClient()
         app_module.wetext_processor = FakeWeTextProcessor()
@@ -317,9 +352,25 @@ def main() -> int:
             assert "otherwise the shortest pause/source-bounded clip" in clone_description
             clone_body_ref = clone_operation["requestBody"]["content"]["multipart/form-data"]["schema"]["$ref"]
             clone_body_schema = openapi["components"]["schemas"][clone_body_ref.rsplit("/", 1)[-1]]
+            legacy_clone_fields = {"name", "accent", "consent_confirmed", "description", "reference_text", "sample"}
+            assert legacy_clone_fields <= set(clone_body_schema["properties"])
+            assert set(clone_body_schema.get("required", [])) == {"name"}
             assert "OmniVoice accepts `us`" in clone_body_schema["properties"]["accent"]["description"]
             assert "`auto` (detect from the reference sample)" in clone_body_schema["properties"]["accent"]["description"]
             assert "ElevenLabs accepts `us`" in clone_body_schema["properties"]["accent"]["description"]
+            for clone_field in (
+                "gender",
+                "age",
+                "remove_background_noise",
+                "sample",
+                "samples",
+            ):
+                assert clone_field in clone_body_schema["properties"]
+            assert "Legacy-compatible" in clone_body_schema["properties"]["sample"]["description"]
+            assert "repeated `samples` fields" in clone_body_schema["properties"]["samples"]["description"]
+            assert clone_body_schema["properties"]["remove_background_noise"]["default"] is False
+            assert "language" not in clone_body_schema["properties"]
+            assert "speech_context" not in clone_body_schema["properties"]
             text_rules_operation = openapi["paths"]["/api/{provider}/text-rules/check"]["post"]
             assert "Check following rules in the text" in text_rules_operation["description"]
             assert "Replace slash `/` symbol" in text_rules_operation["description"]
@@ -341,10 +392,54 @@ def main() -> int:
             assert "OmniVoice uses `voice_id` as a saved" in tts_description
             assert "requires `speech_context` to be a saved OmniVoice speech-context id" in tts_description
             tts_body_ref = tts_operation["requestBody"]["content"]["application/json"]["schema"]["$ref"]
-            tts_schema = openapi["components"]["schemas"][tts_body_ref.rsplit("/", 1)[-1]]["properties"]
-            assert set(tts_schema) == {"text", "voice_id", "speech_context"}
+            tts_request_schema = openapi["components"]["schemas"][tts_body_ref.rsplit("/", 1)[-1]]
+            tts_schema = tts_request_schema["properties"]
+            assert set(tts_schema) == {"text", "voice_id", "speech_context", "voice_settings_override"}
+            assert set(tts_request_schema["required"]) == {"text", "voice_id"}
             assert "OmniVoice preset or cloned/sample voice id" in tts_schema["voice_id"]["description"]
             assert "OmniVoice: required saved speech-context id" in tts_schema["speech_context"]["description"]
+            assert "stability" in tts_schema["voice_settings_override"]["description"]
+            voice_override_schema = openapi["components"]["schemas"]["ElevenLabsVoiceSettingsOverride"]
+            assert set(voice_override_schema["properties"]) == {
+                "stability",
+                "similarity_boost",
+                "style",
+                "speed",
+            }
+            assert not voice_override_schema.get("required")
+            for field in ("stability", "similarity_boost", "style", "speed"):
+                assert "Omit or send null" in voice_override_schema["properties"][field]["description"]
+            saved_context_settings_operation = openapi["paths"][
+                "/api/{provider}/speech-contexts/{context_id}/voice-settings"
+            ]["put"]
+            assert saved_context_settings_operation["summary"] == "Save ElevenLabs speech-context voice settings"
+            saved_context_description = " ".join(saved_context_settings_operation["description"].split())
+            assert "preserved for backward compatibility" in saved_context_description
+            assert "complete effective settings" in saved_context_description
+            saved_context_provider_parameter = next(
+                parameter
+                for parameter in saved_context_settings_operation["parameters"]
+                if parameter["name"] == "provider"
+            )
+            assert saved_context_provider_parameter["description"] == "Provider id: `elevenlabs` only."
+            saved_context_body_ref = saved_context_settings_operation["requestBody"]["content"][
+                "application/json"
+            ]["schema"]["$ref"]
+            saved_context_body_schema = openapi["components"]["schemas"][saved_context_body_ref.rsplit("/", 1)[-1]]
+            assert set(saved_context_body_schema["properties"]) == {"voice_settings"}
+            assert not saved_context_body_schema.get("required")
+            assert "one, several, or all existing fields" in saved_context_body_schema["properties"][
+                "voice_settings"
+            ]["description"]
+            context_response_schema = openapi["components"]["schemas"]["ContextOption"]
+            complete_settings_schema = openapi["components"]["schemas"]["ElevenLabsVoiceSettings"]
+            assert set(context_response_schema["required"]) == {"id", "label", "note", "voice_settings"}
+            assert set(complete_settings_schema["required"]) == {
+                "stability",
+                "similarity_boost",
+                "style",
+                "speed",
+            }
             files_operation = openapi["paths"]["/api/{provider}/files/{relative_path}"]["get"]
             files_description = " ".join(files_operation["description"].split())
             assert "Use only the path segment after `/files/`" in files_description
@@ -390,6 +485,9 @@ def main() -> int:
                 "convert_omnivoice_text_api__provider__text_conversions__conversion_id__convert_post",
                 "delete_omnivoice_context_api__provider__speech_contexts__context_id__delete",
             }
+            elevenlabs_only_operations = {
+                "save_elevenlabs_context_settings_api__provider__speech_contexts__context_id__voice_settings_put",
+            }
             for operation in provider_operations:
                 provider_parameter = next(
                     parameter
@@ -400,10 +498,14 @@ def main() -> int:
                     "Provider id: `omnivoice` only."
                     if operation["operationId"] in omnivoice_only_operations
                     else (
-                        "Provider id: use `omnivoice` for local reference-audio cloning, "
-                        "or `elevenlabs` for provider-hosted instant voice cloning."
-                        if operation["operationId"] == "clone_voice_api__provider__voices_clone_post"
-                        else "Provider id: `omnivoice` or `elevenlabs`."
+                        "Provider id: `elevenlabs` only."
+                        if operation["operationId"] in elevenlabs_only_operations
+                        else (
+                            "Provider id: use `omnivoice` for local reference-audio cloning, "
+                            "or `elevenlabs` for provider-hosted instant voice cloning."
+                            if operation["operationId"] == "clone_voice_api__provider__voices_clone_post"
+                            else "Provider id: `omnivoice` or `elevenlabs`."
+                        )
                     )
                 )
             assert provider_parameter["description"] == expected_description
@@ -417,6 +519,74 @@ def main() -> int:
             assert "text_conversions" in providers["providers"][0]["capabilities"]
             assert "voice_library" in providers["providers"][1]["capabilities"]
             call("GET", "/api/config", "/api/config")
+            saved_founder_context = call(
+                "PUT",
+                "/api/{provider}/speech-contexts/{context_id}/voice-settings",
+                "/api/elevenlabs/speech-contexts/founder_outreach_human/voice-settings",
+                headers=api_headers,
+                json={
+                    "voice_settings": {
+                        "stability": 0.42,
+                        "similarity_boost": 0.68,
+                        "style": 0.12,
+                        "speed": 0.99,
+                    }
+                },
+            ).json()
+            assert saved_founder_context["voice_settings"] == {
+                "stability": 0.42,
+                "similarity_boost": 0.68,
+                "style": 0.12,
+                "speed": 0.99,
+            }
+            partially_saved_founder_context = call(
+                "PUT",
+                "/api/{provider}/speech-contexts/{context_id}/voice-settings",
+                "/api/elevenlabs/speech-contexts/founder_outreach_human/voice-settings",
+                headers=api_headers,
+                json={"voice_settings": {"stability": 0.38}},
+            ).json()
+            assert partially_saved_founder_context["voice_settings"] == {
+                "stability": 0.38,
+                "similarity_boost": 0.68,
+                "style": 0.12,
+                "speed": 0.99,
+            }
+            null_updated_founder_context = call(
+                "PUT",
+                "/api/{provider}/speech-contexts/{context_id}/voice-settings",
+                "/api/elevenlabs/speech-contexts/founder_outreach_human/voice-settings",
+                headers=api_headers,
+                json={"voice_settings": {"stability": None, "speed": 0.98}},
+            ).json()
+            assert null_updated_founder_context["voice_settings"] == {
+                "stability": 0.38,
+                "similarity_boost": 0.68,
+                "style": 0.12,
+                "speed": 0.98,
+            }
+            for no_op_body in ({"voice_settings": {}}, {"voice_settings": None}, {}):
+                no_op_context = call(
+                    "PUT",
+                    "/api/{provider}/speech-contexts/{context_id}/voice-settings",
+                    "/api/elevenlabs/speech-contexts/founder_outreach_human/voice-settings",
+                    headers=api_headers,
+                    json=no_op_body,
+                ).json()
+                assert no_op_context == null_updated_founder_context
+            call(
+                "PUT",
+                "/api/{provider}/speech-contexts/{context_id}/voice-settings",
+                "/api/elevenlabs/speech-contexts/founder_outreach_human/voice-settings",
+                expected=422,
+                headers=api_headers,
+                json={"voice_settings": {"speed": 1.21}},
+            )
+            refreshed_config = call("GET", "/api/config", "/api/config").json()
+            founder_context = next(
+                context for context in refreshed_config["contexts"] if context["id"] == "founder_outreach_human"
+            )
+            assert founder_context["voice_settings"] == null_updated_founder_context["voice_settings"]
             call("GET", "/api/auth/me", "/api/auth/me")
 
             original_auth_mode = app_module.settings.auth_mode
@@ -534,14 +704,89 @@ def main() -> int:
                 headers=api_headers,
             )
 
-            call(
+            legacy_tts_result = call(
+                "POST",
+                "/api/{provider}/tts",
+                "/api/elevenlabs/tts",
+                headers=api_headers,
+                json={
+                    "text": "Legacy TTS request without new optional settings.",
+                    "voice_id": "premade_us_voice",
+                    "speech_context": "outreach_conversational",
+                },
+            ).json()
+            assert set(legacy_tts_result) == set(openapi["components"]["schemas"]["AudioResult"]["properties"])
+
+            legacy_cloned_elevenlabs = call(
                 "POST",
                 "/api/{provider}/voices/clone",
                 "/api/elevenlabs/voices/clone",
                 headers=api_headers,
-                data={"name": "Cloned QA Voice", "accent": "us", "consent_confirmed": "true", "description": "QA clone"},
-                files={"sample": ("sample.mp3", b"sample-audio", "audio/mpeg")},
+                data={
+                    "name": "Legacy Clone QA Voice",
+                    "accent": "us",
+                    "consent_confirmed": "true",
+                    "description": "Legacy single-sample clone",
+                },
+                files={"sample": ("legacy-sample.mp3", b"legacy-sample-audio", "audio/mpeg")},
+            ).json()
+            assert set(legacy_cloned_elevenlabs) == set(
+                openapi["components"]["schemas"]["VoiceRecord"]["properties"]
             )
+            assert len(fake_elevenlabs.clone_calls[-1]["sample_files"]) == 1
+            assert fake_elevenlabs.clone_calls[-1]["remove_background_noise"] is False
+
+            cloned_elevenlabs = call(
+                "POST",
+                "/api/{provider}/voices/clone",
+                "/api/elevenlabs/voices/clone",
+                headers=api_headers,
+                data={
+                    "name": "Cloned QA Voice",
+                    "accent": "us",
+                    "consent_confirmed": "true",
+                    "description": "QA clone",
+                    "gender": "female",
+                    "age": "middle-aged",
+                    "remove_background_noise": "false",
+                },
+                files=[
+                    ("samples", ("sample-one.mp3", b"sample-audio-one", "audio/mpeg")),
+                    ("samples", ("sample-two.wav", b"sample-audio-two", "audio/wav")),
+                ],
+            ).json()
+            assert cloned_elevenlabs["provider_metadata"]["labels"] == {
+                "language": "en",
+                "accent": "American",
+                "gender": "female",
+                "age": "middle-aged",
+            }
+            assert "context_id" not in cloned_elevenlabs["provider_metadata"]
+            assert cloned_elevenlabs["provider_metadata"]["remove_background_noise"] is False
+            assert len(cloned_elevenlabs["provider_metadata"]["source_audio_paths"]) == 2
+            assert fake_elevenlabs.clone_calls[-1]["remove_background_noise"] is False
+            assert len(fake_elevenlabs.clone_calls[-1]["sample_files"]) == 2
+
+            call(
+                "POST",
+                "/api/{provider}/tts",
+                "/api/elevenlabs/tts",
+                headers=api_headers,
+                json={
+                    "text": "Generate using the clone metadata.",
+                    "voice_id": cloned_elevenlabs["voice_id"],
+                    "voice_name": cloned_elevenlabs["display_name"],
+                    "accent": cloned_elevenlabs["accent"],
+                    "speech_context": "founder_outreach_human",
+                },
+            )
+            assert fake_elevenlabs.tts_calls[-1]["language_code"] == "en"
+            assert fake_elevenlabs.tts_calls[-1]["voice_settings"] == {
+                "stability": 0.38,
+                "similarity_boost": 0.68,
+                "style": 0.12,
+                "speed": 0.98,
+            }
 
             tts_result = call(
                 "POST",
@@ -554,6 +799,12 @@ def main() -> int:
                     "voice_name": "QA Premade American",
                     "accent": "us",
                     "speech_context": "outreach_conversational",
+                    "voice_settings_override": {
+                        "stability": 0.45,
+                        "similarity_boost": 0.7,
+                        "style": 0.1,
+                        "speed": 0.96,
+                    },
                     "target_seconds": 55,
                     "wpm": 135,
                 },

@@ -26,24 +26,24 @@ import {
 import "./styles.css";
 import { buildBatchWorkbookFile, extractFirstColumnTexts } from "./workbookAdapter.js";
 
-const DEFAULT_CONTEXTS = [
-  {
-    id: "outreach_conversational",
-    label: "Outreach conversational",
-    note: "Warm, natural, concise, one-to-one delivery."
-  },
-  { id: "customer_support", label: "Customer support", note: "Calm and reassuring." },
-  { id: "narration", label: "Narration", note: "Steady explanatory pacing." },
-  { id: "announcement", label: "Announcement", note: "Confident and clear." },
-  { id: "character_dialogue", label: "Character dialogue", note: "Expressive character voice." },
-  { id: "dramatic_storytelling", label: "Dramatic storytelling", note: "Emotional and deliberate." }
-];
+function emptyElevenLabsVoiceSettings() {
+  return {
+    stability: "",
+    similarity_boost: "",
+    style: "",
+    speed: ""
+  };
+}
 
-const DEFAULT_ACCENTS = [
-  { id: "us", label: "American" },
-  { id: "in", label: "Indian" },
-  { id: "neutral", label: "Neutral" }
-];
+function requestElevenLabsVoiceSettings(settings = {}) {
+  const voiceSettings = {};
+  for (const key of ["stability", "similarity_boost", "style", "speed"]) {
+    if (settings[key] !== "" && settings[key] !== null && settings[key] !== undefined) {
+      voiceSettings[key] = Number(settings[key]);
+    }
+  }
+  return voiceSettings;
+}
 
 const OMNIVOICE_ACCENTS = [
   { id: "us", label: "American" },
@@ -72,6 +72,9 @@ const PROVIDER_SORTS = [
 
 const VOICE_CLONE_READ_ALOUD_SCRIPT =
   "I am recording this voice sample with my permission, so it can be used to create a voice clone in Voice Message Studio. I am speaking in my normal voice, at a steady pace, with clear words and natural pauses. A good voice note should feel warm, direct, and easy to understand. Today I want the sample to capture how I sound in a calm conversation, not a performance. I will pause here... then continue softly. Numbers like twenty-four, forty-seven, and two thousand twenty-six should sound clear. If you are listening back, check for background noise, echo, clipped words, and sudden volume changes. Thanks, that is the sample.";
+
+const ELEVENLABS_CLONE_READ_ALOUD_SCRIPT =
+  "Hi, I am recording this sample with my permission so it can be used to create my voice clone. I am speaking in my normal voice, with the accent, energy, and pacing I would use in a thoughtful founder conversation. Some moments will sound warm and upbeat, while others will be calm and reflective. I want the result to feel natural rather than polished like an advertisement. Here is a short example. We work closely with ambitious business-to-business founders as they explore the United States market. The goal is not simply to prepare a plan on paper. It is to speak with the right people, learn from real conversations, and build meaningful traction. I would be happy to share a few practical ideas and hear what you are working toward. There is no pressure at all; this is simply an invitation to explore whether the timing and fit make sense. I will pause for a moment... and continue in a softer voice. Clear numbers matter too: twenty-four founders, forty-seven conversations, and the year two thousand twenty-six. I am keeping the microphone distance steady and finishing this sample in the same room, with the same tone and recording setup.";
 
 const DEFAULT_PROVIDER = "omnivoice";
 const PROVIDERS = [
@@ -480,6 +483,7 @@ function App() {
     voice_name: "",
     accent: "us",
     speech_context: initialRoute.provider === "omnivoice" ? "english_american" : "outreach_conversational",
+    voice_settings_override: emptyElevenLabsVoiceSettings(),
     target_seconds: 55,
     wpm: 135,
     export_m4a: true
@@ -498,8 +502,12 @@ function App() {
     accent: initialRoute.provider === "omnivoice" ? "auto" : "neutral",
     description: "",
     reference_text: "",
+    gender: "",
+    age: "",
+    remove_background_noise: false,
     consent_confirmed: false,
-    sample: null
+    sample: null,
+    samples: []
   });
   const [batchFile, setBatchFile] = useState(null);
   const [result, setResult] = useState(null);
@@ -609,7 +617,8 @@ function App() {
       voice_id: "",
       voice_name: "",
       accent: "us",
-      speech_context: activeProvider === "omnivoice" ? "english_american" : "outreach_conversational"
+      speech_context: activeProvider === "omnivoice" ? "english_american" : "outreach_conversational",
+      voice_settings_override: emptyElevenLabsVoiceSettings()
     }));
     setBatchForm((current) => ({
       ...current,
@@ -620,7 +629,12 @@ function App() {
     }));
     setCloneForm((current) => ({
       ...current,
-      accent: activeProvider === "omnivoice" ? "auto" : "neutral"
+      accent: activeProvider === "omnivoice" ? "auto" : "neutral",
+      gender: "",
+      age: "",
+      remove_background_noise: false,
+      sample: null,
+      samples: []
     }));
   }, [activeProvider]);
 
@@ -697,6 +711,38 @@ function App() {
       });
       await refreshContexts();
       setStatus(`Saved speech context "${saved.name}".`);
+      return saved;
+    } catch (err) {
+      setError(err.message);
+      throw err;
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function saveElevenLabsContextSettings(contextId, voiceSettings) {
+    setError("");
+    setStatus("");
+    setBusy("save-elevenlabs-context");
+    try {
+      const saved = await apiJson(
+        apiPath("elevenlabs", `/speech-contexts/${encodeURIComponent(contextId)}/voice-settings`),
+        {
+          method: "PUT",
+          body: JSON.stringify({ voice_settings: voiceSettings })
+        }
+      );
+      setConfig((current) => ({
+        ...current,
+        contexts: current.contexts.map((context) =>
+          context.id === saved.id ? saved : context
+        )
+      }));
+      setTtsForm((current) => ({
+        ...current,
+        voice_settings_override: emptyElevenLabsVoiceSettings()
+      }));
+      setStatus(`Saved voice settings for "${saved.label}".`);
       return saved;
     } catch (err) {
       setError(err.message);
@@ -970,13 +1016,24 @@ function App() {
     setResult(null);
     setBusy("generate");
     try {
+      const request = {
+        ...ttsForm,
+        target_seconds: Number(ttsForm.target_seconds),
+        wpm: Number(ttsForm.wpm)
+      };
+      if (activeProvider === "elevenlabs") {
+        const voiceSettings = requestElevenLabsVoiceSettings(ttsForm.voice_settings_override);
+        if (Object.keys(voiceSettings).length > 0) {
+          request.voice_settings_override = voiceSettings;
+        } else {
+          delete request.voice_settings_override;
+        }
+      } else {
+        delete request.voice_settings_override;
+      }
       const payload = await apiJson(apiPath(activeProvider, "/tts"), {
         method: "POST",
-        body: JSON.stringify({
-          ...ttsForm,
-          target_seconds: Number(ttsForm.target_seconds),
-          wpm: Number(ttsForm.wpm)
-        })
+        body: JSON.stringify(request)
       });
       setResult(payload);
       if (payload.status === "completed") {
@@ -998,8 +1055,21 @@ function App() {
     setStatus("");
     setBusy("clone");
     try {
-      if (!cloneForm.sample) {
+      const cloneSamples =
+        activeProvider === "elevenlabs"
+          ? cloneForm.samples?.length
+            ? cloneForm.samples
+            : cloneForm.sample
+              ? [cloneForm.sample]
+              : []
+          : cloneForm.sample
+            ? [cloneForm.sample]
+            : [];
+      if (!cloneSamples.length) {
         throw new Error("Add an uploaded file or live recording sample first.");
+      }
+      if (!cloneForm.consent_confirmed) {
+        throw new Error("Confirm that you have permission to clone this voice.");
       }
       const form = new FormData();
       form.append("name", cloneForm.name);
@@ -1008,8 +1078,19 @@ function App() {
       if (activeProvider === "omnivoice" && cloneForm.reference_text) {
         form.append("reference_text", cloneForm.reference_text);
       }
+      if (activeProvider === "elevenlabs") {
+        form.append("gender", cloneForm.gender);
+        form.append("age", cloneForm.age);
+        form.append("remove_background_noise", cloneForm.remove_background_noise ? "true" : "false");
+      }
       form.append("consent_confirmed", cloneForm.consent_confirmed ? "true" : "false");
-      form.append("sample", cloneForm.sample, cloneForm.sample.name || "recording.webm");
+      cloneSamples.forEach((sampleFile) => {
+        form.append(
+          activeProvider === "elevenlabs" ? "samples" : "sample",
+          sampleFile,
+          sampleFile.name || "recording.webm"
+        );
+      });
       const saved = await apiJson(apiPath(activeProvider, "/voices/clone"), { method: "POST", body: form });
       await refreshVoices();
       await refreshJobs(activeProvider);
@@ -1024,8 +1105,12 @@ function App() {
         accent: activeProvider === "omnivoice" ? "auto" : "neutral",
         description: "",
         reference_text: "",
+        gender: "",
+        age: "",
+        remove_background_noise: false,
         consent_confirmed: false,
-        sample: null
+        sample: null,
+        samples: []
       });
       const referenceClip = saved.provider_metadata?.reference_clip;
       const referenceStatus =
@@ -1034,7 +1119,10 @@ function App() {
               referenceClip.trimmed ? " selected from clear pauses." : " saved without trimming."
             }`
           : "";
-      setStatus(`Cloned and persisted ${saved.display_name}.${referenceStatus}`);
+      const verificationStatus = saved.provider_metadata?.requires_verification
+        ? " ElevenLabs requires verification before this voice can generate audio."
+        : "";
+      setStatus(`Cloned and persisted ${saved.display_name}.${referenceStatus}${verificationStatus}`);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -1109,7 +1197,10 @@ function App() {
       voice_id: value,
       voice_name: voice?.display_name || current.voice_name,
       accent: voice?.accent || current.accent,
-      speech_context: voice?.provider_metadata?.context_id || current.speech_context
+      speech_context:
+        activeProvider === "omnivoice"
+          ? voice?.provider_metadata?.context_id || current.speech_context
+          : current.speech_context
     }));
   }
 
@@ -1129,7 +1220,10 @@ function App() {
       voice_id: value,
       voice_name: voice?.display_name || current.voice_name,
       accent: voice?.accent || current.accent,
-      speech_context: voice?.provider_metadata?.context_id || current.speech_context
+      speech_context:
+        activeProvider === "omnivoice"
+          ? voice?.provider_metadata?.context_id || current.speech_context
+          : current.speech_context
     }));
   }
 
@@ -1254,6 +1348,7 @@ function App() {
             omnivoiceContexts={omnivoiceContexts}
             previewContext={previewContext}
             saveContext={saveContext}
+            saveElevenLabsContextSettings={saveElevenLabsContextSettings}
             deleteContext={deleteContext}
             busy={busy}
           />
@@ -1408,6 +1503,7 @@ function GeneratePage({
   omnivoiceContexts,
   previewContext,
   saveContext,
+  saveElevenLabsContextSettings,
   deleteContext,
   busy
 }) {
@@ -1420,7 +1516,7 @@ function GeneratePage({
   const selectedVoice = filteredVoices.find((voice) => voice.voice_id === ttsForm.voice_id);
   const accentLabel = ACCENT_LABELS[ttsForm.accent] || "selected accent";
   const contextOptions = isElevenLabs
-    ? (config.contexts || []).map((c) => ({ id: c.id, label: c.label }))
+    ? config.contexts || []
     : (omnivoiceContexts || []).map((c) => ({ id: c.id, label: c.name }));
   const visibleContextOptions = isElevenLabs
     ? contextOptions
@@ -1428,7 +1524,35 @@ function GeneratePage({
   const selectedContextVisible = visibleContextOptions.some(
     (context) => context.id === ttsForm.speech_context
   );
+  const selectedContext = contextOptions.find((context) => context.id === ttsForm.speech_context);
+  const contextVoiceSettings = selectedContext?.voice_settings || {};
+  const voiceSettingsOverride = ttsForm.voice_settings_override || emptyElevenLabsVoiceSettings();
+  const hasVoiceSettingsOverride = Object.values(voiceSettingsOverride).some(
+    (value) => value !== "" && value !== null && value !== undefined
+  );
   const hideSpeechContext = !isElevenLabs && selectedVoice?.source_type === "voice_design";
+
+  function setVoiceSettingsOverride(key, value) {
+    setTtsForm((current) => ({
+      ...current,
+      voice_settings_override: {
+        ...(current.voice_settings_override || emptyElevenLabsVoiceSettings()),
+        [key]: value
+      }
+    }));
+  }
+
+  function saveSelectedElevenLabsContextSettings() {
+    if (!selectedContext) return;
+    // Send only the edited fields; the backend merges them over the persisted
+    // values, so a stale config snapshot cannot revert another session's save.
+    return saveElevenLabsContextSettings(
+      selectedContext.id,
+      requestElevenLabsVoiceSettings(voiceSettingsOverride)
+    ).catch(() => {
+      /* surfaced via app status */
+    });
+  }
 
   // Keep speech_context valid for the active provider's context set.
   useEffect(() => {
@@ -1499,7 +1623,13 @@ function GeneratePage({
               <select
                 value={selectedContextVisible ? ttsForm.speech_context : ""}
                 onChange={(event) =>
-                  setTtsForm((current) => ({ ...current, speech_context: event.target.value }))
+                  setTtsForm((current) => ({
+                    ...current,
+                    speech_context: event.target.value,
+                    ...(isElevenLabs
+                      ? { voice_settings_override: emptyElevenLabsVoiceSettings() }
+                      : {})
+                  }))
                 }
               >
                 {!isElevenLabs && visibleContextOptions.length > 0 && (
@@ -1534,6 +1664,24 @@ function GeneratePage({
 
       <ResultPanel activeProvider={activeProvider} result={result} />
 
+      {isElevenLabs && (
+        <ElevenLabsSettingsPanel
+          selectedContext={selectedContext}
+          contextVoiceSettings={contextVoiceSettings}
+          voiceSettingsOverride={voiceSettingsOverride}
+          hasVoiceSettingsOverride={hasVoiceSettingsOverride}
+          onSettingChange={setVoiceSettingsOverride}
+          onSave={saveSelectedElevenLabsContextSettings}
+          onReset={() =>
+            setTtsForm((current) => ({
+              ...current,
+              voice_settings_override: emptyElevenLabsVoiceSettings()
+            }))
+          }
+          busy={busy}
+        />
+      )}
+
       {!isElevenLabs && (
         <OmniVoiceContextEditor
           contexts={(omnivoiceContexts || []).filter(
@@ -1547,6 +1695,133 @@ function GeneratePage({
           previewText={ttsForm.text}
           busy={busy}
         />
+      )}
+    </section>
+  );
+}
+
+function ElevenLabsSettingsPanel({
+  selectedContext,
+  contextVoiceSettings,
+  voiceSettingsOverride,
+  hasVoiceSettingsOverride,
+  onSettingChange,
+  onReset,
+  onSave,
+  busy
+}) {
+  const [expanded, setExpanded] = useState(false);
+
+  return (
+    <section className={`panel tone-panel ${expanded ? "expanded" : "collapsed"}`}>
+      <div className="tone-collapsible-header">
+        <div>
+          <h2>ElevenLabs — Voice Settings</h2>
+          <p>Optional overrides; blank fields use the selected speech-context preset.</p>
+        </div>
+        <button
+          type="button"
+          className="icon-button"
+          onClick={() => setExpanded((current) => !current)}
+          aria-expanded={expanded}
+          aria-label={expanded ? "Collapse ElevenLabs voice settings" : "Expand ElevenLabs voice settings"}
+          title={expanded ? "Collapse" : "Expand"}
+        >
+          {expanded ? <ChevronDown size={18} /> : <ChevronRight size={18} />}
+        </button>
+      </div>
+
+      {expanded && (
+        <>
+          <div className="elevenlabs-context-defaults">
+            <div>
+              <strong>{selectedContext?.label || "Selected context"}</strong>
+              <p>{selectedContext?.note || "Choose a speech context to load its defaults."}</p>
+            </div>
+            <div className="elevenlabs-setting-chips" aria-label="Speech context defaults">
+              <span>Stability {contextVoiceSettings.stability ?? "—"}</span>
+              <span>Similarity {contextVoiceSettings.similarity_boost ?? "—"}</span>
+              <span>Style {contextVoiceSettings.style ?? "—"}</span>
+              <span>Speed {contextVoiceSettings.speed ?? "—"}×</span>
+            </div>
+          </div>
+          <div className="elevenlabs-settings-grid">
+            <label>
+              Stability
+              <input
+                type="number"
+                min="0"
+                max="1"
+                step="0.05"
+                value={voiceSettingsOverride.stability}
+                placeholder={String(contextVoiceSettings.stability ?? "")}
+                onChange={(event) => onSettingChange("stability", event.target.value)}
+              />
+              <small>0 expressive · 1 consistent</small>
+            </label>
+            <label>
+              Similarity boost
+              <input
+                type="number"
+                min="0"
+                max="1"
+                step="0.05"
+                value={voiceSettingsOverride.similarity_boost}
+                placeholder={String(contextVoiceSettings.similarity_boost ?? "")}
+                onChange={(event) => onSettingChange("similarity_boost", event.target.value)}
+              />
+              <small>0 loose · 1 closest match</small>
+            </label>
+            <label>
+              Style exaggeration
+              <input
+                type="number"
+                min="0"
+                max="1"
+                step="0.05"
+                value={voiceSettingsOverride.style}
+                placeholder={String(contextVoiceSettings.style ?? "")}
+                onChange={(event) => onSettingChange("style", event.target.value)}
+              />
+              <small>0 restrained · 1 strongest</small>
+            </label>
+            <label>
+              Speed
+              <input
+                type="number"
+                min="0.7"
+                max="1.2"
+                step="0.01"
+                value={voiceSettingsOverride.speed}
+                placeholder={String(contextVoiceSettings.speed ?? "")}
+                onChange={(event) => onSettingChange("speed", event.target.value)}
+              />
+              <small>0.7× slower · 1.2× faster</small>
+            </label>
+          </div>
+          <div className="elevenlabs-settings-actions">
+            <span>{hasVoiceSettingsOverride ? "Custom overrides active" : "Using context defaults"}</span>
+            <div className="elevenlabs-settings-action-buttons">
+              <button
+                type="button"
+                className="secondary-button"
+                disabled={!hasVoiceSettingsOverride || busy === "save-elevenlabs-context"}
+                onClick={onReset}
+              >
+                Reset to context
+              </button>
+              <button
+                type="button"
+                className="primary-button"
+                disabled={!selectedContext || !hasVoiceSettingsOverride || busy === "save-elevenlabs-context"}
+                onClick={onSave}
+              >
+                <Save size={16} />
+                {busy === "save-elevenlabs-context" ? "Saving..." : "Save context settings"}
+              </button>
+            </div>
+          </div>
+        </>
       )}
     </section>
   );
@@ -3279,6 +3554,19 @@ function ClonePanel({ activeProvider, cloneForm, setCloneForm, cloneVoice, busy,
   const recorderRef = useRef(null);
   const chunksRef = useRef([]);
   const [recording, setRecording] = useState(false);
+  const isElevenLabs = activeProvider === "elevenlabs";
+  const selectedSamples = isElevenLabs
+    ? cloneForm.samples?.length
+      ? cloneForm.samples
+      : cloneForm.sample
+        ? [cloneForm.sample]
+        : []
+    : cloneForm.sample
+      ? [cloneForm.sample]
+      : [];
+  const canSubmit = Boolean(
+    cloneForm.name.trim() && selectedSamples.length && cloneForm.consent_confirmed
+  );
 
   async function startRecording() {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -3290,7 +3578,11 @@ function ClonePanel({ activeProvider, cloneForm, setCloneForm, cloneVoice, busy,
     recorder.onstop = () => {
       const blob = new Blob(chunksRef.current, { type: recorder.mimeType || "audio/webm" });
       const file = new File([blob], "live-recording.webm", { type: blob.type });
-      setCloneForm((current) => ({ ...current, sample: file }));
+      setCloneForm((current) =>
+        isElevenLabs
+          ? { ...current, sample: file, samples: [...(current.samples || []), file] }
+          : { ...current, sample: file }
+      );
       stream.getTracks().forEach((track) => track.stop());
     };
     recorderRef.current = recorder;
@@ -3344,11 +3636,67 @@ function ClonePanel({ activeProvider, cloneForm, setCloneForm, cloneVoice, busy,
           </select>
         </label>
       </div>
+      {isElevenLabs && (
+        <section className="clone-provider-settings" aria-labelledby="elevenlabs-clone-settings-title">
+          <div>
+            <h3 id="elevenlabs-clone-settings-title">ElevenLabs clone labels</h3>
+            <p>English is used automatically. Choose speech context later on Generate or Batch.</p>
+          </div>
+          <div className="field-grid two clone-label-grid">
+            <label>
+              Gender label
+              <select
+                value={cloneForm.gender}
+                onChange={(event) =>
+                  setCloneForm((current) => ({ ...current, gender: event.target.value }))
+                }
+              >
+                <option value="">Not specified</option>
+                <option value="male">Male</option>
+                <option value="female">Female</option>
+                <option value="neutral">Neutral</option>
+              </select>
+            </label>
+            <label>
+              Age label
+              <select
+                value={cloneForm.age}
+                onChange={(event) => setCloneForm((current) => ({ ...current, age: event.target.value }))}
+              >
+                <option value="">Not specified</option>
+                <option value="young">Young</option>
+                <option value="middle-aged">Middle-aged</option>
+                <option value="old">Old</option>
+              </select>
+            </label>
+          </div>
+          <label className="checkbox-line clone-noise-setting">
+            <input
+              type="checkbox"
+              checked={cloneForm.remove_background_noise}
+              onChange={(event) =>
+                setCloneForm((current) => ({
+                  ...current,
+                  remove_background_noise: event.target.checked
+                }))
+              }
+            />
+            <span>
+              Remove background noise
+              <small>Leave off for clean recordings; enable only when the source has audible background noise.</small>
+            </span>
+          </label>
+        </section>
+      )}
       <section className="read-aloud-card">
         <div className="panel-title-row">
           <div>
-            <h2>Read Aloud Sample</h2>
-            <p>Record this in one steady take, in the same voice and accent you want cloned.</p>
+            <h2>{isElevenLabs ? "ElevenLabs IVC Sample" : "Read Aloud Sample"}</h2>
+            <p>
+              {isElevenLabs
+                ? "Aim for 1-2 minutes total, using the same natural voice, accent, and founder-outreach delivery you want cloned."
+                : "Record this in one steady take, in the same voice and accent you want cloned."}
+            </p>
           </div>
           {activeProvider === "omnivoice" && (
             <button
@@ -3363,14 +3711,29 @@ function ClonePanel({ activeProvider, cloneForm, setCloneForm, cloneVoice, busy,
             </button>
           )}
         </div>
-        <p className="read-aloud-script">{VOICE_CLONE_READ_ALOUD_SCRIPT}</p>
+        <p className="read-aloud-script">
+          {isElevenLabs ? ELEVENLABS_CLONE_READ_ALOUD_SCRIPT : VOICE_CLONE_READ_ALOUD_SCRIPT}
+        </p>
         <div className="read-aloud-tips">
-          <span>Quiet room</span>
-          <span>Use a 3-10 second reference audio clip</span>
-          <span>Longer audio can slow inference and degrade clone quality</span>
-          <span>Same distance from mic</span>
-          <span>No music or denoise</span>
-          <span>One consistent tone</span>
+          {isElevenLabs ? (
+            <>
+              <span>1-2 minutes total</span>
+              <span>Avoid more than 3 minutes</span>
+              <span>One speaker only</span>
+              <span>Consistent accent and performance</span>
+              <span>MP3 128 kbps or higher</span>
+              <span>Quiet room, no music or reverb</span>
+            </>
+          ) : (
+            <>
+              <span>Quiet room</span>
+              <span>Use a 3-10 second reference audio clip</span>
+              <span>Longer audio can slow inference and degrade clone quality</span>
+              <span>Same distance from mic</span>
+              <span>No music or denoise</span>
+              <span>One consistent tone</span>
+            </>
+          )}
         </div>
       </section>
       <label>
@@ -3402,16 +3765,41 @@ function ClonePanel({ activeProvider, cloneForm, setCloneForm, cloneVoice, busy,
           <input
             type="file"
             accept="audio/*,.mp3,.wav,.m4a,.webm"
-            onChange={(event) =>
-              setCloneForm((current) => ({ ...current, sample: event.target.files?.[0] || null }))
-            }
+            multiple={isElevenLabs}
+            onChange={(event) => {
+              const files = Array.from(event.target.files || []);
+              if (!files.length) return;
+              // ElevenLabs accepts multiple samples: append picked files so an
+              // earlier live recording is kept, matching the recorder's behavior.
+              setCloneForm((current) => ({
+                ...current,
+                sample: files[0] || current.sample,
+                samples: isElevenLabs ? [...(current.samples || []), ...files] : []
+              }));
+              event.target.value = "";
+            }}
           />
         </label>
         <button type="button" className="secondary-button" onClick={recording ? stopRecording : startRecording}>
           {recording ? <Pause size={16} /> : <Mic size={16} />}
           {recording ? "Stop" : "Record"}
         </button>
-        <span className="sample-name">{cloneForm.sample?.name || "No sample selected"}</span>
+        {selectedSamples.length > 0 && (
+          <button
+            type="button"
+            className="secondary-button"
+            onClick={() => setCloneForm((current) => ({ ...current, sample: null, samples: [] }))}
+          >
+            Clear
+          </button>
+        )}
+        <span className="sample-name">
+          {selectedSamples.length
+            ? `${selectedSamples.length} sample${selectedSamples.length === 1 ? "" : "s"}: ${selectedSamples
+                .map((sampleFile) => sampleFile.name)
+                .join(", ")}`
+            : "No sample selected"}
+        </span>
       </div>
       <label className="checkbox-line">
         <input
@@ -3425,7 +3813,7 @@ function ClonePanel({ activeProvider, cloneForm, setCloneForm, cloneVoice, busy,
       </label>
       <button
         className="primary-button clone-submit-button"
-        disabled={busy === "clone" || !cloneForm.name.trim()}
+        disabled={busy === "clone" || !canSubmit}
       >
         <Plus size={17} />
         {busy === "clone" ? "Cloning..." : activeProvider === "omnivoice" ? "Save Clone" : "Clone and Save"}
@@ -3449,7 +3837,7 @@ function BatchPanel({
   batchResult
 }) {
   const isElevenLabs = activeProvider === "elevenlabs";
-  const voiceOptions = isElevenLabs ? voices.filter((voice) => voice.accent === batchForm.accent) : voices;
+  const voiceOptions = voices;
   const selectedVoiceVisible = voiceOptions.some((voice) => voice.voice_id === batchForm.voice_id);
   const selectedVoice = voiceOptions.find((voice) => voice.voice_id === batchForm.voice_id);
   const contextOptions = isElevenLabs
