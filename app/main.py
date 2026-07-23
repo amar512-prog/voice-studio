@@ -792,12 +792,12 @@ async def delete_voice(
 
     ElevenLabs deletion mirrors the account's My Voices: the voice is deleted
     from ElevenLabs first (irreversibly), then the local record is removed. A
-    voice whose synced metadata marks it as a premade default is removed
-    locally only, because ElevenLabs does not allow deleting those from an
-    account; any other record is sent upstream, and a refusal is returned as
-    400 with the local record left in place. Voices that no longer exist
-    upstream are removed locally without error. OmniVoice records and generated
-    files that used the voice are unaffected.
+    voice marked as a premade default is removed locally only, because
+    ElevenLabs does not allow deleting those from an account; any other record
+    is sent upstream, and a refusal is returned as 400 with the local record
+    left in place. Voices that no longer exist upstream are removed locally
+    without error. OmniVoice records and generated files that used the voice are
+    unaffected.
     """
     provider = validate_provider(provider)
     registry = registry_for(provider)
@@ -805,7 +805,7 @@ async def delete_voice(
         record = next((item for item in registry.list() if item.id == record_id), None)
         if record is None:
             raise HTTPException(status_code=404, detail="Voice record not found.")
-        if (record.provider_metadata or {}).get("category") != "premade":
+        if not _is_premade_voice(record.provider_metadata):
             try:
                 await elevenlabs.delete_voice(record.voice_id)
             except ElevenLabsError as exc:
@@ -855,6 +855,18 @@ async def voice_preview(
     if not preview_url:
         raise HTTPException(status_code=404, detail="No preview available for this voice.")
     return RedirectResponse(url=preview_url)
+
+
+def _is_premade_voice(provider_metadata: dict | None) -> bool:
+    """Whether a saved ElevenLabs record is a premade default voice.
+
+    Premade voices cannot be deleted from an account, so they are removed
+    locally only. The marker differs by how the voice was saved: sync spreads
+    ElevenLabs' raw payload (`category == "premade"`), while the picker sets
+    `premade == True`.
+    """
+    metadata = provider_metadata or {}
+    return metadata.get("category") == "premade" or metadata.get("premade") is True
 
 
 def _save_provider_voice(registry: VoiceRegistry, voice: dict, profile: ProviderVoiceProfile) -> VoiceRecord:
@@ -1288,10 +1300,11 @@ async def sync_provider_voices(provider: ProviderPath, _user: dict = Depends(cur
 
     Every workspace voice is saved or updated by `voice_id` (accents outside
     the supported American/Indian/Neutral buckets are recorded as neutral).
-    Mirroring is two-way: any local record whose `voice_id` is absent from the
-    account is deleted, which includes cloned voices and ids registered
-    directly, so a successful response can remove records it does not list.
-    OmniVoice instead seeds/refreshes its built-in design presets.
+    Mirroring is two-way: a previously synced record whose `voice_id` is absent
+    from the account is deleted, so a successful response can remove records it
+    does not list. Cloned voices and ids registered directly are left untouched
+    because they are intentionally not part of the workspace. OmniVoice instead
+    seeds/refreshes its built-in design presets.
     """
     provider = validate_provider(provider)
     registry = registry_for(provider)
@@ -1313,9 +1326,11 @@ async def sync_provider_voices(provider: ProviderPath, _user: dict = Depends(cur
         profile = workspace_voice_profile(voice)
         synced.append(_save_provider_voice(registry, voice, profile))
 
-    # Mirror deletions: drop local records whose voice is gone from the account.
+    # Mirror deletions: drop only sync-managed records whose voice is gone from
+    # the account. Cloned voices and ids registered directly are intentionally
+    # not in the workspace, so they are left untouched.
     for record in registry.list():
-        if record.voice_id not in account_voice_ids:
+        if record.source_type == "elevenlabs_library" and record.voice_id not in account_voice_ids:
             registry.delete(record.id)
     return synced
 

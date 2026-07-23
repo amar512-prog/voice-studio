@@ -771,10 +771,44 @@ def main() -> int:
                 "workspace_indian_voice",
             }, "Expected sync to mirror every account voice"
             mirrored = call("GET", "/api/{provider}/voices", "/api/elevenlabs/voices", headers=api_headers).json()
-            assert {record["voice_id"] for record in mirrored} == {
+            mirrored_ids = {record["voice_id"] for record in mirrored}
+            # Sync-managed records absent from the account are removed (the saved
+            # shared voice), but a voice registered directly by id survives.
+            assert {"premade_us_voice", "workspace_indian_voice"} <= mirrored_ids
+            assert "raw_provider_voice" in mirrored_ids, (
+                "Sync must not delete voices registered directly by id"
+            )
+            assert mirrored_ids == {
                 "premade_us_voice",
                 "workspace_indian_voice",
-            }, "Expected sync to remove records missing from the account"
+                "raw_provider_voice",
+            }, "Expected sync to remove only sync-managed records missing from the account"
+
+            # Premade voices are removed locally only, never deleted upstream —
+            # covering both the picker `premade` flag and sync's raw `category`.
+            registry = app_module.registry_for("elevenlabs")
+            picker_premade = registry.upsert(
+                app_module.VoiceCreateRequest(
+                    display_name="Picker Premade",
+                    voice_id="picker_premade_voice",
+                    source_type="manual",
+                    accent="us",
+                    consent_status="not_required",
+                ),
+                provider_metadata={"premade": True},
+            )
+            synced_premade = next(record for record in registry.list() if record.voice_id == "premade_us_voice")
+            deleted_before = list(fake_elevenlabs.deleted_voice_ids)
+            for record_id in (picker_premade.id, synced_premade.id):
+                call(
+                    "DELETE",
+                    "/api/{provider}/voices/{record_id}",
+                    f"/api/elevenlabs/voices/{record_id}",
+                    headers=api_headers,
+                )
+            assert fake_elevenlabs.deleted_voice_ids == deleted_before, (
+                "Premade voices must be removed locally only, never deleted from the account"
+            )
 
             legacy_tts_result = call(
                 "POST",

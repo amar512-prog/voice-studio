@@ -66,9 +66,9 @@ Example:
 |---|---|---|---|
 | GET | `/api/{provider}/voices` | both | List the saved voice registry. |
 | POST | `/api/{provider}/voices` | both | Add/update a voice by id. |
-| DELETE | `/api/{provider}/voices/{record_id}` | both | Delete a saved voice. ElevenLabs: also deletes the voice from the account (irreversible). Voices whose synced metadata marks them as premade defaults are removed locally only; any other record is sent upstream, and a refusal returns **400** with the local record kept. |
+| DELETE | `/api/{provider}/voices/{record_id}` | both | Delete a saved voice. ElevenLabs: also deletes the voice from the account (irreversible). Premade default voices are removed locally only; any other record is sent upstream, and a refusal returns **400** with the local record kept. |
 | GET | `/api/{provider}/voices/{record_id}/preview` | both | 307-redirect to a preview clip (best-effort). |
-| POST | `/api/{provider}/voices/sync` | both | ElevenLabs: mirror the account's My Voices — every workspace voice is saved (unsupported accents recorded as neutral). Mirroring is two-way, so local records absent from the account are removed, **including cloned and by-id registered voices**. OmniVoice: seed/refresh the design presets. |
+| POST | `/api/{provider}/voices/sync` | both | ElevenLabs: mirror the account's My Voices — every workspace voice is saved (unsupported accents recorded as neutral). Mirroring is two-way, so previously synced records absent from the account are removed; cloned and by-id registered voices are left untouched. OmniVoice: seed/refresh the design presets. |
 | POST | `/api/{provider}/voices/clone` | both | Multipart clone upload. ElevenLabs accepts repeated `samples`, accent plus optional gender/age labels, and optional `remove_background_noise`; English is fixed internally. OmniVoice accepts one `sample` and stores a local normalized reference WAV, selecting the best-scored continuous 3-10s pause-bounded clip when available, otherwise the longest continuous speech run capped to 10s (optional `reference_text`). |
 | GET | `/api/{provider}/voices/options` | **elevenlabs** | Browse the ElevenLabs library/premade (paged/sorted/accent-filtered). 404 for OmniVoice. |
 | POST | `/api/{provider}/voice-options/{voice_id}/save` | **elevenlabs** | Save a picked library/premade voice. |
