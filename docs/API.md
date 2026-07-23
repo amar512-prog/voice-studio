@@ -1,7 +1,14 @@
 # Voice Message Studio — API Reference
 
 Interactive docs (Swagger UI) are served at **`/docs`**; the raw schema is at
-**`/openapi.json`**. This file documents the same surface for quick reference.
+**`/openapi.json`**. This file is a quick reference for the whole HTTP surface —
+including routes that are intentionally hidden from Swagger (the voice picker,
+`/api/config`, health, and the auth routes), which `/docs` does not list.
+
+Provider-scoped routes document their error responses in Swagger: **401**
+(missing/invalid auth), **404** (unknown `provider` id or missing record),
+**400** (bad input or an ElevenLabs refusal), and **409** (downloading a job
+that is still running).
 
 ## Authentication
 
@@ -59,9 +66,9 @@ Example:
 |---|---|---|---|
 | GET | `/api/{provider}/voices` | both | List the saved voice registry. |
 | POST | `/api/{provider}/voices` | both | Add/update a voice by id. |
-| DELETE | `/api/{provider}/voices/{record_id}` | both | Delete a saved voice. |
+| DELETE | `/api/{provider}/voices/{record_id}` | both | Delete a saved voice. ElevenLabs: also deletes the voice from the account (irreversible). Voices whose synced metadata marks them as premade defaults are removed locally only; any other record is sent upstream, and a refusal returns **400** with the local record kept. |
 | GET | `/api/{provider}/voices/{record_id}/preview` | both | 307-redirect to a preview clip (best-effort). |
-| POST | `/api/{provider}/voices/sync` | both | ElevenLabs: pull eligible workspace voices. OmniVoice: seed/refresh the design presets. |
+| POST | `/api/{provider}/voices/sync` | both | ElevenLabs: mirror the account's My Voices — every workspace voice is saved (unsupported accents recorded as neutral). Mirroring is two-way, so local records absent from the account are removed, **including cloned and by-id registered voices**. OmniVoice: seed/refresh the design presets. |
 | POST | `/api/{provider}/voices/clone` | both | Multipart clone upload. ElevenLabs accepts repeated `samples`, accent plus optional gender/age labels, and optional `remove_background_noise`; English is fixed internally. OmniVoice accepts one `sample` and stores a local normalized reference WAV, selecting the best-scored continuous 3-10s pause-bounded clip when available, otherwise the longest continuous speech run capped to 10s (optional `reference_text`). |
 | GET | `/api/{provider}/voices/options` | **elevenlabs** | Browse the ElevenLabs library/premade (paged/sorted/accent-filtered). 404 for OmniVoice. |
 | POST | `/api/{provider}/voice-options/{voice_id}/save` | **elevenlabs** | Save a picked library/premade voice. |
@@ -206,7 +213,11 @@ curl -s -H "X-API-Key: $KEY" -X POST localhost:8000/api/omnivoice/text-rules/che
   `founder_outreach_human` uses the tested human-like founder settings. The
   optional `voice_settings_override` object can override any of `stability`
   (0-1), `similarity_boost` (0-1), `style` (0-1), and `speed` (0.7-1.2).
-  Any omitted field inherits the selected context default.
+  Any omitted field inherits the context's saved settings, then its built-in
+  preset.
+- **Provider failures return 200**: an ElevenLabs error (bad key, quota, rate
+  limit) does not raise. The response is still `200` with `status: "failed"` and
+  `error` set, so check `status` rather than the HTTP code.
 - **ElevenLabs `enhance_text`** (default `false`; the web UI sends `true` by
   default): an OpenRouter LLM first rewrites the written text into natural
   spoken form — numbers, currencies, dates, URLs, and abbreviations expanded —

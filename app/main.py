@@ -82,7 +82,7 @@ from app.services.omnivoice_text_rules import (
 )
 from app.services.speech_context import CONTEXT_LABELS, CONTEXT_NOTES, VOICE_SETTINGS_BY_CONTEXT
 from app.services.storage import StorageService, new_id, now_utc, safe_filename
-from app.services.voice_filter import ProviderVoiceProfile, provider_voice_profile, provider_voice_rank
+from app.services.voice_filter import ProviderVoiceProfile, workspace_voice_profile
 from app.services.voice_registry import VoiceRegistry
 from app.services.workbook import WorkbookError, WorkbookService
 
@@ -284,12 +284,24 @@ using provider-scoped ElevenLabs or OmniVoice generation, with single and batch
 
 ### Workflow
 
-1. **Pick a provider + voice** — use provider-scoped routes such as
-   `GET /api/{provider}/voices`, `POST /api/{provider}/voices/sync`, and
-   `GET /api/{provider}/voices/options` (ElevenLabs only).
-2. **Generate** — one clip (`POST /api/{provider}/tts`) or a batch from an
-   `.xlsx` (`POST /api/{provider}/tts/batch`). Each run becomes a **job**.
-3. **History** — list jobs (`GET /api/{provider}/jobs`), inspect rows
+1. **Build a voice registry** — list saved voices (`GET /api/{provider}/voices`),
+   mirror an ElevenLabs account into the registry
+   (`POST /api/{provider}/voices/sync`), or clone from consented samples
+   (`POST /api/{provider}/voices/clone`). On ElevenLabs, sync is a **two-way
+   mirror** and `DELETE /api/{provider}/voices/{record_id}` also deletes the
+   voice from the ElevenLabs account — both are irreversible.
+2. **Choose a delivery style** — ElevenLabs generation takes a built-in
+   `speech_context`. Persist per-context stability, similarity, style, and speed
+   with `PUT /api/{provider}/speech-contexts/{context_id}/voice-settings`; a
+   request may still override any of them per generation. OmniVoice instead uses
+   saved speech contexts (`GET /api/{provider}/speech-contexts`).
+3. **Generate** — one clip (`POST /api/{provider}/tts`) or a batch from an
+   `.xlsx` (`POST /api/{provider}/tts/batch`, which returns **202** — poll the
+   job until it reaches a terminal status). Each run becomes a **job**. Set
+   `enhance_text` to rewrite the message into spoken form and add Eleven v3
+   audio tags before generation; it needs `OPENROUTER_API_KEY` on the server and
+   silently falls back to the original text when unavailable.
+4. **History** — list jobs (`GET /api/{provider}/jobs`), inspect rows
    (`GET /api/{provider}/jobs/{job_id}`), and download a ZIP from
    `GET /api/{provider}/jobs/{job_id}/download`.
 
@@ -298,16 +310,51 @@ using provider-scoped ElevenLabs or OmniVoice generation, with single and batch
 - **Browser** — sign in with Google or username/password; the session cookie
   authorizes every call automatically.
 - **Machine / API** — send an `X-API-Key: <key>` header. On this page click
-  **Authorize**, paste the key once, then use **Try it out**.
+  **Authorize**, paste the key once, then use **Try it out**. Calls without a
+  valid cookie or key return **401**.
 """
 
 OPENAPI_TAGS = [
     {"name": "System", "description": "Public service configuration and provider discovery."},
-    {"name": "Voices", "description": "Saved voice registry and ElevenLabs voice picker."},
+    {"name": "Voices", "description": "Saved voice registry: list, sync, clone, and delete."},
+    {
+        "name": "Speech Contexts",
+        "description": (
+            "Delivery styles: ElevenLabs saved voice settings and OmniVoice voice-design contexts."
+        ),
+    },
     {"name": "Generate", "description": "Single and batch text-to-speech generation."},
     {"name": "History", "description": "Generation jobs: list, inspect, and download."},
     {"name": "Files", "description": "Authenticated file downloads from DATA_DIR."},
 ]
+
+
+def api_errors(
+    *,
+    bad_request: str | None = None,
+    not_found: str | None = None,
+    conflict: str | None = None,
+    bad_gateway: str | None = None,
+) -> dict[int | str, dict[str, str]]:
+    """Build an OpenAPI `responses` map from the shared auth/provider errors.
+
+    Every provider-scoped route can return 401 (unauthenticated) and 404
+    (unknown `provider` id); `not_found` extends the 404 text with the route's
+    own not-found cases. Error bodies are always `{"detail": "..."}`.
+    """
+    responses: dict[int | str, dict[str, str]] = {
+        401: {"description": "Missing or invalid session cookie or `X-API-Key` header."},
+        404: {"description": "Unknown `provider` id."},
+    }
+    if not_found:
+        responses[404] = {"description": f"Unknown `provider` id. {not_found}"}
+    if bad_request:
+        responses[400] = {"description": bad_request}
+    if conflict:
+        responses[409] = {"description": conflict}
+    if bad_gateway:
+        responses[502] = {"description": bad_gateway}
+    return responses
 
 
 def _basic_health_payload() -> dict[str, object]:
@@ -647,7 +694,8 @@ def auth_logout(request: Request) -> dict[str, bool]:
     response_model=list[VoiceRecord],
     tags=["Voices"],
     summary="List saved voices",
-    response_description="All registry voices that pass the local eligibility filter.",
+    response_description="Every voice saved in the local registry for this provider.",
+    responses=api_errors(),
 )
 def list_voices(
     provider: ProviderPath,
@@ -656,9 +704,10 @@ def list_voices(
     """
     Return the local persistent voice registry.
 
-    This is the source used by the Generate page voice dropdown. Library voices
-    are filtered to the supported English conversational accent buckets; manual
-    and cloned voices are returned as long as their stored accent is supported.
+    This is the source used by the Generate page voice dropdown. Records are
+    returned as long as their stored accent is one of the supported buckets
+    (`us`, `in`, `neutral`, or `auto`); no language or use-case filter is
+    applied.
     """
     provider = validate_provider(provider)
     return registry_for(provider).list()
@@ -716,10 +765,16 @@ def clear_provider_voice_cache(provider: ElevenLabsProviderPath, _user: dict = D
     "/api/{provider}/voices/{record_id}",
     response_model=VoiceRecord,
     tags=["Voices"],
-    summary="Delete a saved voice",
+    summary="Delete a saved voice (ElevenLabs: also deletes it from the account)",
     response_description="The removed voice record.",
+    responses=api_errors(
+        bad_request=(
+            "ElevenLabs refused the deletion, or the API key is missing, invalid, or unreachable."
+        ),
+        not_found="Voice record not found.",
+    ),
 )
-def delete_voice(
+async def delete_voice(
     provider: ProviderPath,
     record_id: Annotated[
         str,
@@ -733,13 +788,29 @@ def delete_voice(
     _user: dict = Depends(current_user),
 ) -> VoiceRecord:
     """
-    Remove one voice from the local registry.
+    Remove one voice from the registry and, for ElevenLabs, from the account.
 
-    This only removes the app's saved reference. It does not delete the voice
-    from ElevenLabs or remove generated files that used this voice.
+    ElevenLabs deletion mirrors the account's My Voices: the voice is deleted
+    from ElevenLabs first (irreversibly), then the local record is removed. A
+    voice whose synced metadata marks it as a premade default is removed
+    locally only, because ElevenLabs does not allow deleting those from an
+    account; any other record is sent upstream, and a refusal is returned as
+    400 with the local record left in place. Voices that no longer exist
+    upstream are removed locally without error. OmniVoice records and generated
+    files that used the voice are unaffected.
     """
     provider = validate_provider(provider)
-    removed = registry_for(provider).delete(record_id)
+    registry = registry_for(provider)
+    if provider == "elevenlabs":
+        record = next((item for item in registry.list() if item.id == record_id), None)
+        if record is None:
+            raise HTTPException(status_code=404, detail="Voice record not found.")
+        if (record.provider_metadata or {}).get("category") != "premade":
+            try:
+                await elevenlabs.delete_voice(record.voice_id)
+            except ElevenLabsError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+    removed = registry.delete(record_id)
     if removed is None:
         raise HTTPException(status_code=404, detail="Voice record not found.")
     return removed
@@ -784,23 +855,6 @@ async def voice_preview(
     if not preview_url:
         raise HTTPException(status_code=404, detail="No preview available for this voice.")
     return RedirectResponse(url=preview_url)
-
-
-async def _eligible_provider_voices() -> list[tuple[tuple[int, str], dict, ProviderVoiceProfile]]:
-    try:
-        provider_voices = await elevenlabs.list_voices()
-    except ElevenLabsError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    eligible_voices = []
-    for voice in provider_voices:
-        profile = provider_voice_profile(voice)
-        if profile is None:
-            continue
-        eligible_voices.append((provider_voice_rank(voice, profile), voice, profile))
-
-    eligible_voices.sort(key=lambda item: item[0])
-    return eligible_voices
 
 
 def _save_provider_voice(registry: VoiceRegistry, voice: dict, profile: ProviderVoiceProfile) -> VoiceRecord:
@@ -1219,26 +1273,50 @@ async def save_provider_voice_option(
     "/api/{provider}/voices/sync",
     response_model=list[VoiceRecord],
     tags=["Voices"],
-    summary="Sync eligible workspace voices",
-    response_description="Registry records created or updated from eligible workspace voices.",
+    summary="Sync the provider voice list",
+    response_description=(
+        "Registry records after syncing: mirrored ElevenLabs account voices, "
+        "or seeded OmniVoice design presets."
+    ),
+    responses=api_errors(
+        bad_request="Could not read the ElevenLabs voice list; the API key may be missing or unreachable."
+    ),
 )
 async def sync_provider_voices(provider: ProviderPath, _user: dict = Depends(current_user)) -> list[VoiceRecord]:
     """
-    Pull eligible voices from the ElevenLabs workspace into the local registry.
+    Mirror the ElevenLabs account's My Voices into the local registry.
 
-    Eligibility is intentionally narrow: English, conversational, and currently
-    American or Indian accent only. Existing records are updated by `voice_id`.
+    Every workspace voice is saved or updated by `voice_id` (accents outside
+    the supported American/Indian/Neutral buckets are recorded as neutral).
+    Mirroring is two-way: any local record whose `voice_id` is absent from the
+    account is deleted, which includes cloned voices and ids registered
+    directly, so a successful response can remove records it does not list.
+    OmniVoice instead seeds/refreshes its built-in design presets.
     """
     provider = validate_provider(provider)
     registry = registry_for(provider)
     if provider == "omnivoice":
         return _sync_omnivoice_presets(registry)
 
+    try:
+        provider_voices = await elevenlabs.list_voices()
+    except ElevenLabsError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     synced: list[VoiceRecord] = []
-    for _rank, voice, profile in await _eligible_provider_voices():
-        if profile.accent not in PROVIDER_LIBRARY_ACCENTS:
+    account_voice_ids: set[str] = set()
+    for voice in provider_voices:
+        voice_id = voice.get("voice_id") or voice.get("id")
+        if not voice_id:
             continue
+        account_voice_ids.add(str(voice_id))
+        profile = workspace_voice_profile(voice)
         synced.append(_save_provider_voice(registry, voice, profile))
+
+    # Mirror deletions: drop local records whose voice is gone from the account.
+    for record in registry.list():
+        if record.voice_id not in account_voice_ids:
+            registry.delete(record.id)
     return synced
 
 
@@ -1270,6 +1348,11 @@ def _title_label(value: str) -> str:
     tags=["Speech Contexts"],
     summary="Save ElevenLabs speech-context voice settings",
     response_description="Updated speech context with its persisted ElevenLabs voice settings.",
+    responses=api_errors(
+        not_found=(
+            "Saved voice settings are available only for ElevenLabs, or the speech-context id is unknown."
+        )
+    ),
 )
 def save_elevenlabs_context_settings(
     provider: ElevenLabsProviderPath,
@@ -1647,6 +1730,14 @@ async def preview_omnivoice_context(
     tags=["Voices"],
     summary="Clone a voice from a sample",
     response_description="Saved registry record for the cloned OmniVoice or ElevenLabs voice.",
+    responses=api_errors(
+        bad_request=(
+            "Invalid `accent`, `gender`, or `age`; `consent_confirmed` not `true`; no sample, an "
+            "empty sample, or more than one sample for OmniVoice; unusable reference audio; or an "
+            "ElevenLabs refusal such as instant voice cloning requiring a paid plan."
+        ),
+        bad_gateway="ElevenLabs accepted the upload but did not return a voice id.",
+    ),
 )
 async def clone_voice(
     provider: CloneProviderPath,
@@ -1680,7 +1771,8 @@ async def clone_voice(
             description=(
                 "ElevenLabs only: optional clone metadata label: `male`, `female`, or `neutral`. "
                 "Omit or leave empty to send no gender label."
-            )
+            ),
+            examples=["female"],
         ),
     ] = "",
     age: Annotated[
@@ -1689,7 +1781,8 @@ async def clone_voice(
             description=(
                 "ElevenLabs only: optional clone metadata label: `young`, `middle-aged`, or `old`. "
                 "Omit or leave empty to send no age label."
-            )
+            ),
+            examples=["middle-aged"],
         ),
     ] = "",
     remove_background_noise: Annotated[
@@ -1939,7 +2032,13 @@ def _save_job_manifest(
     response_model=AudioResult,
     tags=["Generate"],
     summary="Generate one voice note",
-    response_description="Single-row generation result with download URLs when completed.",
+    response_description=(
+        "Single-row result with download URLs when completed. Returns 200 even when generation "
+        "failed — check `status`."
+    ),
+    responses=api_errors(
+        bad_request="OmniVoice text rules blocked the message; fix the text and retry."
+    ),
 )
 async def create_tts(provider: ProviderPath, request: TtsApiRequest, _user: dict = Depends(current_user)) -> AudioResult:
     """
@@ -1954,6 +2053,16 @@ async def create_tts(provider: ProviderPath, request: TtsApiRequest, _user: dict
     audio tags. OmniVoice uses `voice_id` as a saved
     preset or cloned/sample voice and requires `speech_context` to be a saved
     OmniVoice speech-context id with voice design and generation settings.
+
+    Set `enhance_text` (ElevenLabs only) to rewrite the message into spoken form
+    and add Eleven v3 audio tags before generation; the text actually spoken is
+    returned as `spoken_text`. It requires `OPENROUTER_API_KEY` on the server and
+    falls back to the original text, leaving `spoken_text` null, when the
+    conversion is unavailable or fails.
+
+    Provider failures do not raise: the response is still 200 with `status` set
+    to `failed` and `error` describing the problem, so check `status` rather than
+    the HTTP code.
     """
     provider = validate_provider(provider)
     tts_request = request.to_tts_request()
@@ -2139,6 +2248,12 @@ async def run_batch_job(provider: str, job_id: str, created_at: datetime, reques
     tags=["Generate"],
     summary="Submit an .xlsx batch (async)",
     response_description="Accepted job. Poll GET /api/{provider}/jobs/{job_id} for status, progress, and results.",
+    responses=api_errors(
+        bad_request=(
+            "Not an .xlsx upload, the workbook could not be parsed, it has no data rows, it exceeds "
+            "the row limit, or OmniVoice text rules blocked a row."
+        )
+    ),
 )
 async def create_batch(
     provider: ProviderPath,
@@ -2146,7 +2261,8 @@ async def create_batch(
         ...,
         description=(
             "Excel .xlsx workbook with a sheet named tts_requests. Required columns: "
-            "text, voice_id. Optional: voice_name, accent, speech_context, target_seconds, wpm, export_m4a."
+            "text, voice_id. Optional: voice_name, accent, speech_context, target_seconds, wpm, "
+            "export_m4a, enhance_text."
         ),
     ),
     _user: dict = Depends(current_user),
@@ -2229,6 +2345,7 @@ async def create_batch(
     tags=["History"],
     summary="List generation jobs",
     response_description="Jobs sorted newest first.",
+    responses=api_errors(),
 )
 def list_jobs(provider: ProviderPath, _user: dict = Depends(current_user)) -> list[JobSummary]:
     """List persisted single and batch generation jobs from the data directory."""
@@ -2249,11 +2366,14 @@ def list_jobs(provider: ProviderPath, _user: dict = Depends(current_user)) -> li
     summary="Download a job as a ZIP",
     response_class=Response,
     responses={
+        **api_errors(
+            not_found="Job not found.",
+            conflict="Job is still running. Poll until it finishes.",
+        ),
         200: {
             "description": "ZIP archive containing row transcripts and generated audio files.",
             "content": {"application/zip": {}},
         },
-        404: {"description": "Job not found."},
     },
 )
 def download_job(
@@ -2318,6 +2438,7 @@ def download_job(
     tags=["History"],
     summary="Get one job with rows",
     response_description="Full job manifest with row-level results.",
+    responses=api_errors(not_found="Job not found."),
 )
 def get_job(
     provider: ProviderPath,

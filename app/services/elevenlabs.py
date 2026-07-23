@@ -174,6 +174,26 @@ class ElevenLabsClient:
             raise ElevenLabsError(self._provider_error(response))
         return response.json()
 
+    async def delete_voice(self, voice_id: str) -> bool:
+        """Delete a voice from the ElevenLabs account.
+
+        Returns True when the voice was deleted and False when it did not exist
+        upstream (already removed); raises ElevenLabsError for other failures.
+        """
+        api_key = self._require_key()
+        url = f"{self.settings.elevenlabs_base_url}/voices/{voice_id}"
+        headers = {"xi-api-key": api_key}
+        try:
+            async with httpx.AsyncClient(timeout=60) as client:
+                response = await client.delete(url, headers=headers)
+        except httpx.HTTPError as exc:
+            raise ElevenLabsError(f"Could not reach ElevenLabs: {exc!s} ({type(exc).__name__}).") from exc
+        if response.status_code >= 400:
+            if response.status_code == 404 or "voice_does_not_exist" in response.text:
+                return False
+            raise ElevenLabsError(self._provider_error(response))
+        return True
+
     async def add_shared_voice(self, public_owner_id: str, voice_id: str, new_name: str) -> dict[str, Any]:
         api_key = self._require_key()
         url = f"{self.settings.elevenlabs_base_url}/voices/add/{public_owner_id}/{voice_id}"

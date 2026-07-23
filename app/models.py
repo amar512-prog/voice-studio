@@ -69,7 +69,13 @@ class ElevenLabsVoiceSettings(BaseModel):
 
 
 class ElevenLabsVoiceSettingsOverride(BaseModel):
-    """Optional ElevenLabs settings layered over the selected speech-context defaults."""
+    """Optional ElevenLabs settings layered over the selected speech context.
+
+    Each field resolves in order: this per-request override, then the settings
+    saved for the context via
+    `PUT /api/{provider}/speech-contexts/{context_id}/voice-settings`, then the
+    built-in context preset.
+    """
 
     stability: float | None = Field(
         default=None,
@@ -77,7 +83,7 @@ class ElevenLabsVoiceSettingsOverride(BaseModel):
         le=1.0,
         description=(
             "Optional ElevenLabs stability override from more expressive (0) to more stable (1). "
-            "Omit or send null to inherit the selected speech context."
+            "Omit or send null to inherit the context's saved settings, then its built-in preset."
         ),
         examples=[0.5],
     )
@@ -87,7 +93,8 @@ class ElevenLabsVoiceSettingsOverride(BaseModel):
         le=1.0,
         description=(
             "Optional ElevenLabs voice-similarity override from 0 to 1. Omit or send null to "
-            "inherit the selected speech context; the effect can vary by model."
+            "inherit the context's saved settings, then its built-in preset; the effect can "
+            "vary by model."
         ),
         examples=[0.75],
     )
@@ -97,7 +104,8 @@ class ElevenLabsVoiceSettingsOverride(BaseModel):
         le=1.0,
         description=(
             "Optional ElevenLabs style-exaggeration override from 0 to 1. Omit or send null to "
-            "inherit the selected context; 0 is the safe default and model support varies."
+            "inherit the context's saved settings, then its built-in preset; 0 is the safe "
+            "default and model support varies."
         ),
         examples=[0.0],
     )
@@ -107,17 +115,28 @@ class ElevenLabsVoiceSettingsOverride(BaseModel):
         le=1.2,
         description=(
             "Optional ElevenLabs speed multiplier from 0.7 to 1.2, where 1 is normal speed. "
-            "Omit or send null to inherit the selected context; model support varies."
+            "Omit or send null to inherit the context's saved settings, then its built-in "
+            "preset; model support varies."
         ),
         examples=[0.96],
     )
 
 
 class ContextOption(BaseModel):
-    id: SpeechContext = Field(description="Speech context id accepted by TTS requests.")
+    id: SpeechContext = Field(
+        description=(
+            "Built-in ElevenLabs speech-context id accepted by TTS requests. OmniVoice contexts "
+            "are saved separately and listed by `GET /api/{provider}/speech-contexts`."
+        )
+    )
     label: str = Field(description="UI label.")
     note: str = Field(description="Short delivery guidance.")
-    voice_settings: ElevenLabsVoiceSettings = Field(description="ElevenLabs defaults used by this context.")
+    voice_settings: ElevenLabsVoiceSettings = Field(
+        description=(
+            "Effective ElevenLabs settings for this context: saved values where present, "
+            "otherwise the built-in preset."
+        )
+    )
 
 
 class ElevenLabsContextSettingsRequest(BaseModel):
@@ -164,7 +183,9 @@ class ConfigResponse(BaseModel):
     openrouter_configured: bool = Field(
         description="Whether OpenRouter is configured for spoken-text enhancement and text conversion."
     )
-    contexts: list[ContextOption] = Field(description="Available speech contexts.")
+    contexts: list[ContextOption] = Field(
+        description="Built-in ElevenLabs speech contexts with their effective voice settings."
+    )
     accents: list[AccentOption] = Field(description="Available accent buckets.")
 
 
@@ -188,9 +209,14 @@ class CacheClearResponse(BaseModel):
 class VoiceRecord(BaseModel):
     id: str = Field(description="Local persistent registry id.")
     display_name: str = Field(description="Human-readable voice name shown in the UI.")
-    voice_id: str = Field(description="ElevenLabs voice id used for TTS calls.")
+    voice_id: str = Field(
+        description=(
+            "Provider voice id used for TTS calls: an ElevenLabs voice id, or a local OmniVoice "
+            "preset or clone id."
+        )
+    )
     source_type: VoiceSourceType = Field(default="manual", description="How this voice entered the registry.")
-    accent: Accent = Field(default="neutral", description="App-level accent bucket used for filtering.")
+    accent: Accent = Field(default="neutral", description="App-level accent bucket recorded with the voice.")
     consent_status: ConsentStatus = Field(
         default="not_required",
         description="Consent state for cloned voices. Library/manual voices normally use not_required.",
@@ -203,7 +229,13 @@ class VoiceRecord(BaseModel):
 
 class VoiceCreateRequest(BaseModel):
     display_name: str = Field(min_length=1, description="Name to show in the saved voice registry.")
-    voice_id: str = Field(min_length=1, description="ElevenLabs voice id to save or update.")
+    voice_id: str = Field(
+        min_length=1,
+        description=(
+            "Provider voice id to save or update: an ElevenLabs voice id, or a local OmniVoice "
+            "preset or clone id."
+        ),
+    )
     source_type: VoiceSourceType = Field(default="manual", description="Source classification for the saved voice.")
     accent: Accent = Field(default="neutral", description="Accent filter bucket for this voice.")
     consent_status: ConsentStatus = Field(default="not_required", description="Consent status for the source voice.")
@@ -668,18 +700,26 @@ class WarningState(BaseModel):
 class AudioResult(BaseModel):
     job_id: str = Field(description="Generation job id.")
     index: int | None = Field(default=None, description="1-based row index within the job.")
-    status: Literal["completed", "failed"] = Field(description="Generation outcome for this row.")
+    status: Literal["completed", "failed"] = Field(
+        description=(
+            "Generation outcome for this row. A failed row is still returned with HTTP 200, "
+            "so check this field rather than the status code."
+        )
+    )
     text: str = Field(description="Input text for this row.")
     spoken_text: str | None = Field(
         default=None,
         description=(
-            "Final spoken text sent to the provider when `enhance_text` ran, including any "
-            "Eleven v3 audio tags. Null when the original text was used unchanged."
+            "ElevenLabs only: final spoken text sent to the provider when `enhance_text` ran, "
+            "including any Eleven v3 audio tags. Null when the original text was used unchanged."
         ),
     )
-    voice_id: str = Field(description="ElevenLabs voice id used for this row.")
+    voice_id: str = Field(description="Provider voice id used for this row.")
     voice_name: str | None = Field(default=None, description="Optional voice display name.")
-    model_id: str | None = Field(default=None, description="ElevenLabs model id used.")
+    model_id: str | None = Field(
+        default=None,
+        description="Provider model id used, for example `eleven_v3` or `omnivoice_batch_space`.",
+    )
     speech_context: str = Field(description="Speech context used for this row (delivery context id or OmniVoice context id).")
     accent: Accent = Field(description="Accent bucket recorded with this row.")
     estimated_seconds: float = Field(description="Estimated duration from text and WPM.")
@@ -731,5 +771,10 @@ class JobDetail(JobSummary):
 
 class HealthResponse(BaseModel):
     status: str = Field(description="Service health status.")
-    provider_configured: bool = Field(description="Whether ELEVENLABS_API_KEY is configured.")
+    provider_configured: bool = Field(
+        description=(
+            "Whether the active provider is configured: `ELEVENLABS_API_KEY` for ElevenLabs, "
+            "or the space URL for OmniVoice."
+        )
+    )
     ffmpeg_available: bool = Field(description="Whether ffmpeg is available for duration/M4A work.")

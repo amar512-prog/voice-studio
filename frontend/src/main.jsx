@@ -938,6 +938,15 @@ function App() {
   }
 
   async function deleteVoice(voice) {
+    const deletesFromAccount =
+      activeProvider === "elevenlabs" && voice.provider_metadata?.category !== "premade";
+    if (deletesFromAccount) {
+      const confirmed = window.confirm(
+        `Delete "${voice.display_name}" from this app AND from your ElevenLabs account (My Voices)? ` +
+          "This cannot be undone."
+      );
+      if (!confirmed) return;
+    }
     setError("");
     setStatus("");
     setBusy(`delete-voice-${voice.id}`);
@@ -952,7 +961,11 @@ function App() {
           ? { ...current, voice_id: "", voice_name: "" }
           : current
       );
-      setStatus(`Removed ${removed.display_name} from the registry.`);
+      setStatus(
+        deletesFromAccount
+          ? `Deleted ${removed.display_name} here and from your ElevenLabs account.`
+          : `Removed ${removed.display_name} from the registry.`
+      );
     } catch (err) {
       setError(err.message);
     } finally {
@@ -1003,7 +1016,7 @@ function App() {
       if (providerVoiceOptionsLoaded) await refreshProviderVoiceOptions();
       setStatus(
         activeProvider === "elevenlabs"
-          ? `Synced ${payload.length} English conversational American/Indian voice(s).`
+          ? `Synced ${payload.length} voice(s) from ElevenLabs My Voices; voices deleted in ElevenLabs were removed here too.`
           : `Synced ${payload.length} RevVoice preset voice(s).`
       );
     } catch (err) {

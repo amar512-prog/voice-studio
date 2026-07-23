@@ -44,6 +44,7 @@ class FakeElevenLabs:
     def __init__(self) -> None:
         self.clone_calls: list[dict[str, Any]] = []
         self.tts_calls: list[dict[str, Any]] = []
+        self.deleted_voice_ids: list[str] = []
 
     async def text_to_speech(
         self,
@@ -139,6 +140,10 @@ class FakeElevenLabs:
             "preview_url": "https://example.com/fetched.mp3",
             "labels": {"language": "English", "accent": "American", "use_case": "conversational"},
         }
+
+    async def delete_voice(self, voice_id: str) -> bool:
+        self.deleted_voice_ids.append(voice_id)
+        return True
 
     async def add_shared_voice(self, public_owner_id: str, voice_id: str, new_name: str) -> dict[str, Any]:
         return {"voice_id": f"workspace_{voice_id}", "name": new_name}
@@ -476,6 +481,51 @@ def main() -> int:
             )
             assert "returned by `GET /api/{provider}/speech-contexts`" in context_id_parameter["description"]
             assert "Use the `id` field" in context_id_parameter["description"]
+
+            # Front page must not advertise routes that are hidden from the schema.
+            info_description = " ".join(openapi["info"]["description"].split())
+            assert "voices/options" not in info_description, (
+                "Front page references a route that is include_in_schema=False"
+            )
+            assert "sync is a **two-way mirror**" in info_description
+            assert "enhance_text" in info_description
+            assert "return **401**" in info_description
+            tag_names = {tag["name"] for tag in openapi.get("tags", [])}
+            assert "Speech Contexts" in tag_names, "Visible Speech Contexts routes need tag metadata"
+            assert tag_names >= {"System", "Voices", "Speech Contexts", "Generate", "History", "Files"}
+
+            # Documented error responses for the ElevenLabs-relevant operations.
+            assert {"400", "401", "404"} <= set(delete_voice_operation["responses"])
+            assert "refused the deletion" in delete_voice_operation["responses"]["400"]["description"]
+            assert "also deletes it from the account" in delete_voice_operation["summary"]
+            sync_operation = openapi["paths"]["/api/{provider}/voices/sync"]["post"]
+            assert {"400", "401", "404"} <= set(sync_operation["responses"])
+            assert "ElevenLabs" not in sync_operation["summary"], "Sync serves both providers"
+            sync_description = " ".join(sync_operation["description"].split())
+            assert "Mirroring is two-way" in sync_description
+            assert {"400", "401", "404", "502"} <= set(clone_operation["responses"])
+            assert "paid plan" in clone_operation["responses"]["400"]["description"]
+            assert {"400", "401", "404"} <= set(tts_operation["responses"])
+            assert "Returns 200 even when generation failed" in tts_operation["responses"]["200"]["description"]
+            assert "enhance_text" in tts_description
+            batch_operation = openapi["paths"]["/api/{provider}/tts/batch"]["post"]
+            assert {"400", "401", "404"} <= set(batch_operation["responses"])
+            download_operation = openapi["paths"]["/api/{provider}/jobs/{job_id}/download"]["get"]
+            assert "409" in download_operation["responses"], "Job-still-running conflict must be documented"
+            assert {"401", "404"} <= set(saved_context_settings_operation["responses"])
+            assert "only for ElevenLabs" in saved_context_settings_operation["responses"]["404"]["description"]
+            batch_file_schema = openapi["components"]["schemas"]["Body_create_batch_api__provider__tts_batch_post"]
+            assert "enhance_text" in batch_file_schema["properties"]["file"]["description"]
+
+            # Provider-agnostic response fields must not claim to be ElevenLabs-only.
+            audio_result_schema = openapi["components"]["schemas"]["AudioResult"]["properties"]
+            assert not audio_result_schema["model_id"]["description"].startswith("ElevenLabs")
+            assert "omnivoice_batch_space" in audio_result_schema["model_id"]["description"]
+            assert "ElevenLabs only" in audio_result_schema["spoken_text"]["description"]
+            voice_record_schema = openapi["components"]["schemas"]["VoiceRecord"]["properties"]
+            assert not voice_record_schema["voice_id"]["description"].startswith("ElevenLabs")
+            assert "OmniVoice" in voice_record_schema["voice_id"]["description"]
+
             providers_operation = openapi["paths"]["/api/providers"]["get"]
             assert providers_operation["security"] == [{"APIKeyHeader": []}]
             provider_operations = [
@@ -651,6 +701,9 @@ def main() -> int:
                 f"/api/elevenlabs/voices/{manual_voice['id']}",
                 headers=api_headers,
             )
+            assert fake_elevenlabs.deleted_voice_ids == ["manual_qa_voice"], (
+                "Expected deleting a non-premade record to delete the ElevenLabs account voice"
+            )
 
             premade_page = call(
                 "GET",
@@ -706,12 +759,22 @@ def main() -> int:
                     "accent": picked_shared["accent"],
                 },
             )
-            call(
+
+            synced_records = call(
                 "POST",
                 "/api/{provider}/voices/sync",
                 "/api/elevenlabs/voices/sync",
                 headers=api_headers,
-            )
+            ).json()
+            assert {record["voice_id"] for record in synced_records} == {
+                "premade_us_voice",
+                "workspace_indian_voice",
+            }, "Expected sync to mirror every account voice"
+            mirrored = call("GET", "/api/{provider}/voices", "/api/elevenlabs/voices", headers=api_headers).json()
+            assert {record["voice_id"] for record in mirrored} == {
+                "premade_us_voice",
+                "workspace_indian_voice",
+            }, "Expected sync to remove records missing from the account"
 
             legacy_tts_result = call(
                 "POST",

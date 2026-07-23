@@ -66,15 +66,37 @@ def provider_voice_rank(voice: dict[str, Any], profile: ProviderVoiceProfile) ->
 
 
 def is_registry_eligible(record: dict[str, Any]) -> bool:
-    accent = _normalize(record.get("accent"))
-    if accent not in ALLOWED_ACCENTS:
-        return False
+    # The registry mirrors the account's My Voices, so any supported accent
+    # bucket is kept; unsupported accents are normalized to "neutral" on save.
+    return _normalize(record.get("accent")) in ALLOWED_ACCENTS
 
-    if record.get("source_type") == "elevenlabs_library":
-        metadata = record.get("provider_metadata") or {}
-        return provider_voice_profile(metadata) is not None
 
-    return True
+def workspace_voice_profile(voice: dict[str, Any]) -> ProviderVoiceProfile:
+    """Best-effort profile for any workspace voice, never rejecting it.
+
+    Voices that pass the strict eligibility profile keep it; everything else
+    (other accents, non-conversational use cases) falls back to normalized
+    label values with a neutral accent so the registry can mirror the account.
+    """
+    profile = provider_voice_profile(voice)
+    if profile is not None:
+        return profile
+    labels = _collect_labels(voice)
+    accent = _supported_accent([_normalize(labels.get("accent"))]) or "neutral"
+    language = _normalize(labels.get("language") or labels.get("language_code")) or "en"
+    use_case = next(
+        (
+            value
+            for value in [
+                _normalize(labels.get("use_case")),
+                _normalize(labels.get("usecase")),
+                _normalize(labels.get("usage")),
+            ]
+            if value
+        ),
+        "general",
+    )
+    return ProviderVoiceProfile(accent=accent, language=language, use_case=use_case)
 
 
 def _collect_labels(voice: dict[str, Any]) -> dict[str, Any]:

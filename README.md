@@ -45,7 +45,7 @@ Generate and Batch include a "Prepare spoken delivery" checkbox (on by default) 
 
 The expanded ElevenLabs voice-settings panel includes a Save context settings button. Saving promotes the current overrides to persistent defaults for the selected speech context, so Generate and Batch reuse them after reloads and Docker rebuilds. The existing API wrapper accepts complete settings objects and backward-compatible partial updates; omitted or null values keep the current context defaults.
 
-Voice sync fetches the full ElevenLabs voice list and saves every English voice with a US, India, or neutral accent whose provider use case is conversational. The registry panel scrolls when more than five matching voices are available.
+Voice sync mirrors the ElevenLabs account's My Voices: every workspace voice is saved (accents outside US/India/Neutral are recorded as neutral), and voices deleted in ElevenLabs are removed from the registry on the next sync. Deleting a non-premade voice in the app also deletes it from the ElevenLabs account after a confirmation prompt. The registry panel scrolls when more than five matching voices are available.
 
 ElevenLabs instant cloning supports one or more consented samples, fixed English plus accent/gender/age labels, and an optional background-noise removal switch. The UI recommends 1-2 minutes of clean, consistent, single-speaker audio and leaves denoising off for clean recordings. Speech context is selected independently on Generate or Batch, and English is sent to ElevenLabs as `language_code` during generation.
 
