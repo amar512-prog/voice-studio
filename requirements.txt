@@ -2,6 +2,7 @@ fastapi==0.115.6
 google-auth==2.40.3
 httpx==0.28.1
 itsdangerous==2.2.0
+mcp[cli]==1.26.0
 openpyxl==3.1.5
 python-multipart==0.0.20
 pynini==2.1.6.post1

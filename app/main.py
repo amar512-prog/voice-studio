@@ -18,11 +18,16 @@ from typing import Annotated
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Path as ApiPath, Query, Request, UploadFile
 from fastapi.responses import FileResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
+from mcp.server.auth.middleware.auth_context import AuthContextMiddleware
+from mcp.server.auth.middleware.bearer_auth import BearerAuthBackend
 from pydantic import BaseModel, Field, ValidationError
+from starlette.middleware.authentication import AuthenticationMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 
 from app.auth import current_user, validate_basic_credentials, verify_google_credential
 from app.config import get_settings
+from app.mcp_auth import oauth_router
+from app.mcp_server import mcp
 from app.models import (
     AudioResult,
     CacheClearResponse,
@@ -402,6 +407,12 @@ def _reconcile_interrupted_jobs(storage_service: StorageService) -> None:
         logger.warning("Marked interrupted job %s for provider %s on startup", job_id, storage_service.provider)
 
 
+# Build the MCP Starlette app once. This lazily creates the streamable-HTTP
+# session manager and the OAuth + /mcp routes; we then lift those routes onto
+# the FastAPI app below so OAuth discovery lives at the site root.
+mcp_app = mcp.streamable_http_app()
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     for storage_service in _storages.values():
@@ -415,7 +426,9 @@ async def lifespan(_app: FastAPI):
         if not preset_marker.exists():
             _sync_omnivoice_presets(registry_for("omnivoice"))
             omnivoice_store.write_json(preset_marker, {"seeded": True})
-    yield
+    # The MCP endpoint needs its session manager running for the app's lifetime.
+    async with mcp.session_manager.run():
+        yield
 
 
 app = FastAPI(
@@ -435,6 +448,18 @@ app.add_middleware(
     https_only=settings.session_secure,
     max_age=60 * 60 * 12,
 )
+
+# --- MCP server wiring -------------------------------------------------------
+# Lift the MCP + OAuth routes (built above) onto this app so /mcp and the OAuth
+# discovery documents are served from the site root, ahead of the SPA catch-all
+# defined at the bottom of this module. When auth is enabled we also install the
+# bearer middleware (so /mcp validates tokens and tools can read the caller's
+# identity) and the Google-backed login routes.
+app.router.routes.extend(mcp_app.routes)
+if mcp._token_verifier is not None:
+    app.add_middleware(AuthContextMiddleware)
+    app.add_middleware(AuthenticationMiddleware, backend=BearerAuthBackend(mcp._token_verifier))
+    app.include_router(oauth_router)
 
 
 class GoogleLogin(BaseModel):
