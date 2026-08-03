@@ -46,7 +46,7 @@ from app.config import get_settings
 
 settings = get_settings()
 
-PUBLIC_URL = os.environ.get("MCP_PUBLIC_URL", "https://voice.basisvps.com").rstrip("/")
+PUBLIC_URL = os.environ.get("MCP_PUBLIC_URL", "https://voice-notes.revengineer.ai").rstrip("/")
 LOGIN_PATH = "/oauth/voicestudio/login"
 COMPLETE_PATH = "/oauth/voicestudio/complete"
 

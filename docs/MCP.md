@@ -4,7 +4,7 @@ Voice Message Studio exposes its text-to-speech workflow as an **MCP server** so
 coding agents — Claude Code (CLI **and** the claude.ai web app) and Codex — can
 generate voice notes directly, without a browser or any local install.
 
-- **Endpoint:** `https://voice.basisvps.com/mcp` (streamable-HTTP)
+- **Endpoint:** `https://voice-notes.revengineer.ai/mcp` (streamable-HTTP)
 - **Auth:** OAuth 2.0 (PKCE + Dynamic Client Registration). You sign in **once**
   with Google; the client stores a refresh token and never prompts again.
 - **No local Python / API key** is needed on any client — the server is hosted
@@ -36,12 +36,12 @@ silent (a stored refresh token is reused, and survives redeploys).
 ### Claude Code — web app (claude.ai)
 
 Settings → **Connectors** → **Add custom connector** → paste
-`https://voice.basisvps.com/mcp` → complete the Google consent once.
+`https://voice-notes.revengineer.ai/mcp` → complete the Google consent once.
 
 ### Claude Code — CLI
 
 ```bash
-claude mcp add --transport http voicestudio https://voice.basisvps.com/mcp
+claude mcp add --transport http voicestudio https://voice-notes.revengineer.ai/mcp
 ```
 
 Then, in a session, run `/mcp` and choose **Authenticate** the first time.
@@ -52,7 +52,7 @@ Add a remote MCP server to `~/.codex/config.toml` and authenticate once:
 
 ```toml
 [mcp_servers.voicestudio]
-url = "https://voice.basisvps.com/mcp"
+url = "https://voice-notes.revengineer.ai/mcp"
 ```
 
 ```bash
@@ -79,7 +79,7 @@ vars (in addition to the app's usual settings):
 
 | Var | Default | Purpose |
 |---|---|---|
-| `MCP_PUBLIC_URL` | `https://voice.basisvps.com` | Public base URL; used to build the OAuth issuer + resource identifiers and discovery documents. **Must match how clients reach the server.** |
+| `MCP_PUBLIC_URL` | `https://voice-notes.revengineer.ai` | Public base URL; used to build the OAuth issuer + resource identifiers and discovery documents. **Must match how clients reach the server.** |
 | `MCP_DISABLE_AUTH` | *(unset)* | Set to `1` to serve `/mcp` without OAuth — **local testing only**. |
 
 OAuth clients, authorization codes, and access/refresh tokens are persisted in a
