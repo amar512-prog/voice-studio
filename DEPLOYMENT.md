@@ -3,7 +3,7 @@
 Voice Message Studio runs behind Nginx the same way Mailcheck does: the container
 binds to localhost, and Nginx owns the public domain.
 
-- Public host: `voice.basisvps.com`
+- Public host: `voice-notes.revengineer.ai`
 - Local app port: `127.0.0.1:8011`
 - Repo path on the server: `~/voice-studio`
 
@@ -24,6 +24,10 @@ HOST_BIND=127.0.0.1
 HOST_PORT=8011
 SESSION_SECRET=$(openssl rand -hex 32)
 SESSION_SECURE=true
+
+# MCP server. Must exactly match the public URL clients reach (scheme + host,
+# no trailing path); it builds the OAuth issuer + discovery documents.
+MCP_PUBLIC_URL=https://voice-notes.revengineer.ai
 
 ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY}
 ELEVENLABS_MODEL_ID=eleven_v3
@@ -86,13 +90,29 @@ docker compose logs --tail=30 app
 Health only confirms config is present, not that secrets are valid. Confirm the
 real paths in a browser through the proxy:
 
-- `https://voice.basisvps.com/elevenlabs/voices` and `/elevenlabs/history` —
+- `https://voice-notes.revengineer.ai/elevenlabs/voices` and `/elevenlabs/history` —
   existing voices and jobs are present (i.e. the data migration ran).
-- `https://voice.basisvps.com/omnivoice/generate` — pick the **English – American**
+- `https://voice-notes.revengineer.ai/omnivoice/generate` — pick the **English – American**
   design preset and generate; audio confirms `HUGGINGFACE_TOKEN` works.
 
-`./data` is the source of truth (voices, OmniVoice speech contexts, and jobs) and
-persists across `up --build`. Interactive API docs: `https://voice.basisvps.com/docs`.
+Confirm the MCP endpoint is exposed with OAuth (see [docs/MCP.md](docs/MCP.md)
+for the full reference):
+
+```bash
+# discovery doc — the "resource" must be the https public URL, not localhost
+curl -s https://voice-notes.revengineer.ai/.well-known/oauth-protected-resource/mcp
+# unauthenticated /mcp must 401 with a WWW-Authenticate: Bearer header
+curl -s -o /dev/null -D - -X POST https://voice-notes.revengineer.ai/mcp \
+  -H 'Accept: application/json, text/event-stream' \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | grep -iE 'HTTP/|www-authenticate'
+# connect a client (opens a one-time Google sign-in on first use)
+claude mcp add --transport http voicestudio https://voice-notes.revengineer.ai/mcp
+```
+
+`./data` is the source of truth (voices, OmniVoice speech contexts, and jobs, plus
+the MCP OAuth tokens in `mcp_oauth.db`) and persists across `up --build`.
+Interactive API docs: `https://voice-notes.revengineer.ai/docs`.
 
 ## Nginx
 
@@ -100,8 +120,20 @@ persists across `up --build`. Interactive API docs: `https://voice.basisvps.com/
 cat > /etc/nginx/sites-available/voice-studio <<'EOF'
 server {
     listen 80;
-    server_name voice.basisvps.com;
+    server_name voice-notes.revengineer.ai;
     client_max_body_size 50m;
+
+    # MCP endpoint (streamable-HTTP). SSE responses must not be buffered, and
+    # sessions are long-lived — so override buffering/timeouts for /mcp only.
+    location /mcp {
+        proxy_pass http://127.0.0.1:8011;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_buffering off;
+        proxy_read_timeout 3600s;
+    }
 
     location / {
         proxy_pass http://127.0.0.1:8011;
