@@ -116,24 +116,18 @@ Interactive API docs: `https://voice-notes.revengineer.ai/docs`.
 
 ## Nginx
 
+A single `location /` proxying to the app is all that's needed — it already
+forwards `/mcp` and the `/.well-known/*` OAuth discovery paths. The MCP endpoint
+needs **no special block**: `generate_voice_note` is synchronous but finishes in
+seconds (under Nginx's default `proxy_read_timeout`), and batch generation is
+async (submit → poll `get_job`), so no request is ever held open long.
+
 ```bash
 cat > /etc/nginx/sites-available/voice-studio <<'EOF'
 server {
     listen 80;
     server_name voice-notes.revengineer.ai;
-    client_max_body_size 50m;
-
-    # MCP endpoint (streamable-HTTP). SSE responses must not be buffered, and
-    # sessions are long-lived — so override buffering/timeouts for /mcp only.
-    location /mcp {
-        proxy_pass http://127.0.0.1:8011;
-        proxy_http_version 1.1;
-        proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-For $remote_addr;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_buffering off;
-        proxy_read_timeout 3600s;
-    }
+    client_max_body_size 50m;   # covers .xlsx batch uploads
 
     location / {
         proxy_pass http://127.0.0.1:8011;
@@ -149,5 +143,6 @@ nginx -t
 systemctl reload nginx
 ```
 
-If HTTPS is not already provisioned for the subdomain, run the same Certbot flow
-used for `mailcheck.basisvps.com`, then keep `SESSION_SECURE=true`.
+Then provision HTTPS with Certbot (`certbot --nginx -d voice-notes.revengineer.ai`),
+which rewrites the vhost to listen on 443 and adds the HTTP→HTTPS redirect. Keep
+`SESSION_SECURE=true`.
