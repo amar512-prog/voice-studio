@@ -16,6 +16,7 @@ routes), the tools import ``app.main`` lazily, inside each function body.
 
 from __future__ import annotations
 
+import base64
 import shutil
 from pathlib import Path
 from typing import Any
@@ -354,3 +355,137 @@ def save_job_audio(job_id: str, out_dir: str, provider: str = "elevenlabs") -> d
                 shutil.copy2(src, dest)
                 written.append(str(dest))
     return {"job_id": job_id, "provider": provider, "files": written, "count": len(written)}
+
+
+@mcp.tool()
+def get_job_audio(
+    job_id: str,
+    index: int = 1,
+    fmt: str = "mp3",
+    provider: str = "elevenlabs",
+) -> dict[str, Any]:
+    """Return one generated audio file as base64, over the MCP connection.
+
+    Use this to pull the audio bytes to wherever the agent runs (the ``mp3_url``
+    / ``mp3_path`` in other tools point at the server, not the caller). Decode
+    ``audio_b64`` and write it to a ``.mp3`` / ``.m4a`` file. For a batch job,
+    fetch rows one at a time via ``index`` (base64 audio is large).
+
+    Args:
+        job_id: A job id from ``generate_voice_note``, ``generate_batch``, or
+            ``list_jobs``.
+        index: 1-based row index within the job (default 1; single-note jobs
+            only have row 1).
+        fmt: ``mp3`` (default) or ``m4a`` (LinkedIn-ready mono AAC).
+        provider: ``elevenlabs`` (default) or ``omnivoice``.
+    """
+    from app import main
+
+    try:
+        provider = main.validate_provider(provider)
+    except HTTPException as exc:
+        raise _clean(exc) from exc
+    fmt = fmt.lower().lstrip(".")
+    if fmt not in {"mp3", "m4a"}:
+        raise ValueError("fmt must be 'mp3' or 'm4a'.")
+    provider_storage = main.storage_for(provider)
+    if provider_storage.read_job_manifest(job_id) is None:
+        raise ValueError("Job not found.")
+    path = provider_storage.job_row_path(job_id, index, fmt)
+    if not path.exists():
+        raise ValueError(
+            f"No {fmt} file for row {index} of {job_id} (row may have failed, or the "
+            f"job is still running — poll get_job first)."
+        )
+    data = path.read_bytes()
+    return {
+        "job_id": job_id,
+        "provider": provider,
+        "index": index,
+        "format": fmt,
+        "filename": f"{job_id}-row-{index:03d}.{fmt}",
+        "bytes": len(data),
+        "audio_b64": base64.b64encode(data).decode("ascii"),
+    }
+
+
+@mcp.tool()
+async def generate_batch(
+    items: list[dict[str, Any]],
+    provider: str = "elevenlabs",
+) -> dict[str, Any]:
+    """Submit many voice notes as one async job, then poll get_job for results.
+
+    Returns immediately with a ``job_id`` and ``status="running"``; generation
+    runs in the background (bounded by the server's concurrency limit). Poll
+    ``get_job(job_id)`` until ``status`` is ``completed`` / ``partial`` /
+    ``failed``, then pull audio with ``get_job_audio`` or ``save_job_audio``.
+    This mirrors the async submit-and-poll pattern for bulk work rather than
+    blocking one long call.
+
+    Args:
+        items: One dict per note. Required keys: ``text``, ``voice_id``.
+            Optional: ``voice_name``, ``accent``, ``speech_context``,
+            ``enhance_text``, ``target_seconds``, ``wpm``, ``export_m4a`` —
+            same fields as ``generate_voice_note``. For OmniVoice,
+            ``speech_context`` is required per item.
+        provider: ``elevenlabs`` (default) or ``omnivoice``.
+    """
+    import asyncio
+    from datetime import datetime, timezone
+
+    from app import main
+    from app.models import TtsRequest
+    from app.services.omnivoice_text_rules import OmniVoiceTextRuleError
+    from app.services.storage import new_id
+
+    try:
+        provider = main.validate_provider(provider)
+    except HTTPException as exc:
+        raise _clean(exc) from exc
+
+    if not items:
+        raise ValueError("Provide at least one item.")
+    if len(items) > main.settings.max_batch_rows:
+        raise ValueError(
+            f"This batch has {len(items)} rows, above the limit of "
+            f"{main.settings.max_batch_rows}. Split it into smaller batches."
+        )
+
+    requests: list[TtsRequest] = []
+    for i, item in enumerate(items, start=1):
+        try:
+            requests.append(TtsRequest.model_validate(item))
+        except Exception as exc:  # pydantic validation
+            raise ValueError(f"Item {i} is invalid: {exc}") from exc
+
+    if provider == "omnivoice":
+        rule_errors = []
+        for i, request in enumerate(requests, start=1):
+            try:
+                main.require_omnivoice_text_ready(request.text)
+            except OmniVoiceTextRuleError as exc:
+                rule_errors.append(f"Item {i}: {exc}")
+        if rule_errors:
+            preview = " | ".join(rule_errors[:10])
+            if len(rule_errors) > 10:
+                preview += f" | {len(rule_errors) - 10} more invalid item(s)."
+            raise ValueError(f"OmniVoice text rules failed. {preview}")
+
+    provider_storage = main.storage_for(provider)
+    job_id = new_id("job")
+    created_at = datetime.now(timezone.utc)
+    total = len(requests)
+    main._write_job_progress(provider_storage, job_id, created_at, status="running", total_rows=total, rows=[])
+
+    task = asyncio.create_task(main.run_batch_job(provider, job_id, created_at, requests))
+    main._background_tasks.add(task)
+    task.add_done_callback(main._background_tasks.discard)
+
+    return {
+        "job_id": job_id,
+        "provider": provider,
+        "status": "running",
+        "total_rows": total,
+        "poll": "Call get_job(job_id) until status is completed / partial / failed.",
+    }

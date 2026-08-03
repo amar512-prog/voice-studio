@@ -17,9 +17,11 @@ generate voice notes directly, without a browser or any local install.
 | `list_voices(provider="elevenlabs")` | Saved voices for a provider → `voice_id`, `display_name`, `accent`, `source_type` |
 | `list_speech_contexts(provider="elevenlabs")` | Delivery styles (ElevenLabs built-ins) or saved OmniVoice speech-context ids |
 | `generate_voice_note(text, voice_id, provider="elevenlabs", speech_context=..., enhance_text=False, target_seconds=55, wpm=135, export_m4a=True)` | Synthesize one note → result + `mp3_path` / `m4a_path` / URLs (the easy one-shot) |
+| `generate_batch(items, provider="elevenlabs")` | Submit many notes as one async job → `job_id`; poll `get_job`, then pull audio |
 | `list_jobs(provider="elevenlabs", limit=50)` | Past generation jobs, newest first |
 | `get_job(job_id, provider="elevenlabs")` | Full job manifest with per-row results and local file paths |
-| `save_job_audio(job_id, out_dir, provider="elevenlabs")` | Copy a job's MP3/M4A/transcript files into a directory |
+| `get_job_audio(job_id, index=1, fmt="mp3", provider="elevenlabs")` | One row's audio as base64 over MCP (decode + write to a file) |
+| `save_job_audio(job_id, out_dir, provider="elevenlabs")` | Copy a job's MP3/M4A/transcript files into a directory **on the server** |
 
 Providers are `elevenlabs` (default) and `omnivoice`. For OmniVoice,
 `speech_context` is a **required** saved context id (e.g. `english_american`);
